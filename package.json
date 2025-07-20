@@ -1,22 +1,45 @@
 {
   "name": "koishi-plugin-apexrankwatch",
-  "description": "一个用于跟踪 Apex Legends 玩家段位并自动通知段位变化的 Koishi 插件。",
-  "version": "0.0.1",
+  "description": "Apex Legends 排位分数查询和变化监测插件",
+  "version": "1.1.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
-    "lib",
-    "dist"
+    "lib"
   ],
   "license": "MIT",
-  "scripts": {},
+  "author": "moeneri <moeneriii@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moeneri/koishi-plugin-apexrankwatch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/moeneri/koishi-plugin-apexrankwatch/issues"
+  },
+  "homepage": "https://github.com/moeneri/koishi-plugin-apexrankwatch",
   "keywords": [
+    "bot",
     "chatbot",
     "koishi",
-    "plugin"
+    "plugin",
+    "apex",
+    "neri",
+    "apex-legends",
+    "rank",
+    "tracker"
   ],
-  "devDependencies": {},
   "peerDependencies": {
-    "koishi": "^4.18.7"
+    "koishi": "^4.13.0"
+  },
+  "dependencies": {
+    "axios": "^1.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.5.9",
+    "typescript": "^5.2.2"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build"
   }
 }
