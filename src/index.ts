@@ -16,6 +16,7 @@ export interface Config {
   timeout: number
   maxScoreDropThreshold: number
   minValidScore: number
+  blacklist: string  // 新增黑名单属性
 }
 
 // 配置模式定义
@@ -26,7 +27,8 @@ export const Config = Schema.object({
   maxRetries: Schema.number().default(3).description('API请求最大重试次数'),
   timeout: Schema.number().default(10000).description('API请求超时时间（毫秒）'),
   maxScoreDropThreshold: Schema.number().default(2000).description('最大分数下降阈值（超过此值的下降将被视为异常）'),
-  minValidScore: Schema.number().default(1).description('最小有效分数（低于此值的分数将被视为无效）')
+  minValidScore: Schema.number().default(1).description('最小有效分数（低于此值的分数将被视为无效）'),
+  blacklist: Schema.string().default('').description('黑名单ID列表，多个ID用逗号分隔，例如：player1,player2')
 })
 
 // 群订阅记录接口
@@ -44,6 +46,7 @@ interface PlayerData {
   lastChecked: number
   globalRankPercent?: string
   selectedLegend?: string
+  legendRank?: string // 添加英雄排名信息字段
 }
 
 // 翻译映射表
@@ -100,6 +103,37 @@ const nameMap = {
   'Sparrow': '琉雀'
 }
 
+// 英雄强度排名表（基于最新的第25赛季数据）
+const legendRankMap = {
+  '罗芭': 'S',           // Loba
+  '地平线': 'S',         // Horizon
+  '动力小子': 'S',       // Octane
+  '瓦尔基里': 'A',       // Valkyrie
+  '命脉': 'A',           // Lifeline
+  '恶灵': 'A',           // Wraith
+  '探路者': 'A',         // Pathfinder
+  '艾许': 'B',           // Ash
+  '希尔': 'B',           // Seer
+  '密客': 'B',           // Crypto
+  '沃特森': 'B',         // Wattson
+  '寻血猎犬': 'B',       // Bloodhound
+  '班加罗尔': 'C',       // Bangalore
+  '纽卡斯尔': 'C',       // Newcastle
+  '暴雷': 'C',           // Fuse
+  '直布罗陀': 'C',       // Gibraltar
+  '弹道': 'D',           // Ballistic
+  '侵蚀': 'D',           // Caustic
+  '亡灵': 'D',           // Revenant
+  '疯玛吉': 'D',         // Mad Maggie
+  '幻象': 'D',           // Mirage
+  '兰伯特': 'D',         // Rampart
+  '导管': 'D',           // Conduit
+  '卡特莉丝': 'D',       // Catalyst
+  '万蒂奇': 'D',         // Vantage
+  '变幻': 'C',           // Alter
+  '琉雀': 'B'            // Sparrow
+}
+
 // 翻译函数
 function translate(name: string): string {
   return nameMap[name] || name
@@ -108,6 +142,20 @@ function translate(name: string): string {
 // 检查字符串是否包含指定模式
 function containsPattern(text: string, pattern: string): boolean {
   return text.toLowerCase().includes(pattern.toLowerCase())
+}
+
+// 获取英雄排名等级
+function getLegendRank(legendName: string): string {
+  return legendRankMap[legendName] || '未知'
+}
+
+// 检查玩家ID是否在黑名单中
+function isBlacklisted(playerName: string, blacklist: string): boolean {
+  if (!blacklist || blacklist.trim() === '') return false
+  
+  // 转换为小写并按逗号分割
+  const blacklistArray = blacklist.toLowerCase().split(',').map(item => item.trim())
+  return blacklistArray.includes(playerName.toLowerCase())
 }
 
 export function apply(ctx: Context, config: Config) {
@@ -150,7 +198,7 @@ export function apply(ctx: Context, config: Config) {
     try {
       groupSubscriptions = JSON.parse(fs.readFileSync(dataFile, 'utf-8'))
     } catch (error) {
-      ctx.logger.error('Failed to load group subscription data:', error)
+      ctx.logger.error('加载群订阅数据失败:', error)
     }
   }
   
@@ -159,7 +207,7 @@ export function apply(ctx: Context, config: Config) {
     try {
       fs.writeFileSync(dataFile, JSON.stringify(groupSubscriptions), 'utf-8')
     } catch (error) {
-      ctx.logger.error('Failed to save group subscription data:', error)
+      ctx.logger.error('保存群订阅数据失败:', error)
     }
   }
   
@@ -171,7 +219,7 @@ export function apply(ctx: Context, config: Config) {
       try {
         if (attempt > 0) {
           const delay = Math.pow(2, attempt) * 1000
-          ctx.logger.info(`Retrying API request (attempt ${attempt}/${maxRetries}) after ${delay}ms delay...`)
+          ctx.logger.info(`正在重试API请求 (尝试 ${attempt}/${maxRetries}) 延迟 ${delay}ms...`)
           await new Promise(resolve => setTimeout(resolve, delay))
         }
         
@@ -186,7 +234,7 @@ export function apply(ctx: Context, config: Config) {
                                 (error.response && (error.response.status >= 500 || error.response.status === 429))
         
         if (isRetriableError && attempt < maxRetries) {
-          ctx.logger.warn(`API request failed with error (${error.code || error.message}). Retrying...`)
+          ctx.logger.warn(`API请求失败，错误: (${error.code || error.message})。正在重试...`)
           continue
         }
         
@@ -286,6 +334,15 @@ export function apply(ctx: Context, config: Config) {
       helpText += `   当玩家段位分数发生变化时，会在群内发送通知\n`
       helpText += `   分数变化异常判断：下降超过 ${config.maxScoreDropThreshold} 分将被视为异常\n`
       helpText += `   最小有效分数：${config.minValidScore} 分以下的分数将被视为无效\n`
+      helpText += `   英雄强度等级：S>A>B>C>D，基于第25赛季数据\n`
+      
+      // 只有在黑名单中有条目时才添加黑名单信息
+      if (config.blacklist && config.blacklist.trim() !== '') {
+        const count = config.blacklist.split(',').filter(id => id.trim() !== '').length
+        helpText += `\n⚠️ 黑名单说明：\n`
+        helpText += `   当前已设置 ${count} 个黑名单ID\n`
+        helpText += `   黑名单ID无法被查询或监控\n`
+      }
       
       return helpText
     })
@@ -297,6 +354,12 @@ export function apply(ctx: Context, config: Config) {
       ctx.logger.info(`收到apexrank命令，参数：${playerName}`)
       if (!playerName) {
         return '请提供玩家名称，例如: /apexrank moeneri'
+      }
+      
+      // 检查黑名单后再继续
+      if (isBlacklisted(playerName, config.blacklist)) {
+        ctx.logger.warn(`阻止查询黑名单ID: ${playerName}`)
+        return `⛔ 该ID（${playerName}）已被管理员加入黑名单，禁止查询`
       }
       
       try {
@@ -324,6 +387,12 @@ export function apply(ctx: Context, config: Config) {
       
       if (!session.guildId) {
         return '此命令仅适用于群聊，请在群聊中使用'
+      }
+      
+      // 检查黑名单后再继续
+      if (isBlacklisted(playerName, config.blacklist)) {
+        ctx.logger.warn(`阻止监控黑名单ID: ${playerName}`)
+        return `⛔ 该ID（${playerName}）已被管理员加入黑名单，禁止监控`
       }
       
       try {
@@ -354,6 +423,7 @@ export function apply(ctx: Context, config: Config) {
           rankDiv: playerData.rankDiv,
           globalRankPercent: playerData.globalRankPercent,
           selectedLegend: playerData.selectedLegend,
+          legendRank: playerData.legendRank,
           lastChecked: Date.now()
         }
         
@@ -399,7 +469,14 @@ export function apply(ctx: Context, config: Config) {
         }
         
         if (player.selectedLegend) {
-          response += `   🎮 当前英雄: ${player.selectedLegend}\n`
+          response += `   🎮 当前英雄: ${player.selectedLegend}`
+          
+          // 如果有英雄排名信息，则显示
+          if (player.legendRank && player.legendRank !== '未知') {
+            response += ` (${player.legendRank}级)`
+          }
+          
+          response += `\n`
         }
         
         response += `\n`
@@ -456,6 +533,12 @@ export function apply(ctx: Context, config: Config) {
       for (const playerKey in group.players) {
         const player = group.players[playerKey]
         
+        // 跳过黑名单中的玩家（可能是之前添加的）
+        if (isBlacklisted(player.playerName, config.blacklist)) {
+          ctx.logger.warn(`跳过黑名单ID的定时检查: ${player.playerName}`)
+          continue
+        }
+        
         try {
           const playerData = await getPlayerStats(player.playerName)
           const newRankScore = playerData.rankScore
@@ -475,6 +558,7 @@ export function apply(ctx: Context, config: Config) {
             player.rankDiv = playerData.rankDiv
             player.globalRankPercent = playerData.globalRankPercent
             player.selectedLegend = playerData.selectedLegend
+            player.legendRank = playerData.legendRank
             player.lastChecked = Date.now()
             
             const now = new Date()
@@ -494,9 +578,19 @@ export function apply(ctx: Context, config: Config) {
               message += `\n🌎 全球排名：前 ${playerData.globalRankPercent}%`
             }
             
-            // 只有玩家在线时才显示当前英雄
+            // 只有玩家在线时才显示当前英雄和英雄强度等级
             if (playerData.isOnline === '在线' && playerData.selectedLegend) {
               message += `\n🎮 当前英雄：${playerData.selectedLegend}`
+              
+              // 如果有英雄排名，添加英雄强度等级信息
+              if (playerData.legendRank && playerData.legendRank !== '未知') {
+                message += ` (${playerData.legendRank}级)`
+              }
+            }
+            
+            // 只有玩家在线时才显示当前状态
+            if (playerData.isOnline === '在线' && playerData.currentState) {
+              message += `\n🎯 当前状态：${playerData.currentState}`
             }
             
             // 尝试发送消息，但不影响程序运行
@@ -553,12 +647,16 @@ export function apply(ctx: Context, config: Config) {
       // 获取当前使用英雄
       const selectedLegend = translate(realtimeData.selectedLegend || '')
       
+      // 获取英雄强度等级
+      const legendRank = getLegendRank(selectedLegend)
+      
       // 解析并翻译当前状态文本
       let currentState = realtimeData.currentStateAsText || realtimeData.currentState || 'offline'
       
       // 如果状态包含时间信息（例如"In match (00:39)"），提取出时间信息
       let timeInfo = ''
-      const matchTimeRegex = /$(\d+:\d+)$/
+      // 修复正则表达式以正确匹配时间信息
+      const matchTimeRegex = /$(\d+:\d+)$$/
       const matchTime = currentState.match(matchTimeRegex)
       if (matchTime) {
         timeInfo = ` (${matchTime[1]})`
@@ -585,6 +683,7 @@ export function apply(ctx: Context, config: Config) {
         globalRankPercent: globalRankPercent,
         isOnline: isOnlineStatus,
         selectedLegend: selectedLegend,
+        legendRank: legendRank,  // 添加英雄强度等级
         currentState: translatedState,
         // 添加一个字段来标识玩家是否在大厅或比赛中
         isInLobbyOrMatch: containsPattern(currentState, 'lobby') || containsPattern(currentState, 'match')
@@ -626,7 +725,14 @@ export function apply(ctx: Context, config: Config) {
       
       // 只有在玩家在线时才显示当前使用的英雄
       if (playerData.selectedLegend) {
-        message += `🎯 当前英雄：${playerData.selectedLegend}\n`
+        message += `🎯 当前英雄：${playerData.selectedLegend}`
+        
+        // 如果有英雄排名，添加英雄强度等级信息
+        if (playerData.legendRank && playerData.legendRank !== '未知') {
+          message += ` (${playerData.legendRank}级)`
+        }
+        
+        message += `\n`
       }
       
       // 只有在玩家在大厅或比赛中时才显示当前状态
