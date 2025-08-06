@@ -14,9 +14,8 @@ export interface Config {
   dataDir: string
   maxRetries: number
   timeout: number
-  maxScoreDropThreshold: number
   minValidScore: number
-  blacklist: string  // 新增黑名单属性
+  blacklist: string  // 黑名单属性
 }
 
 // 配置模式定义
@@ -26,7 +25,6 @@ export const Config = Schema.object({
   dataDir: Schema.string().default('./data/apexrankwatch').description('数据存储目录'),
   maxRetries: Schema.number().default(3).description('API请求最大重试次数'),
   timeout: Schema.number().default(10000).description('API请求超时时间（毫秒）'),
-  maxScoreDropThreshold: Schema.number().default(2000).description('最大分数下降阈值（超过此值的下降将被视为异常）'),
   minValidScore: Schema.number().default(1).description('最小有效分数（低于此值的分数将被视为无效）'),
   blacklist: Schema.string().default('').description('黑名单ID列表，多个ID用逗号分隔，例如：player1,player2')
 })
@@ -46,7 +44,15 @@ interface PlayerData {
   lastChecked: number
   globalRankPercent?: string
   selectedLegend?: string
-  legendRank?: string // 添加英雄排名信息字段
+  legendStats?: LegendStats // 英雄统计数据
+}
+
+// 英雄统计数据接口
+interface LegendStats {
+  kills?: {
+    value: number
+    globalPercent: string
+  }
 }
 
 // 翻译映射表
@@ -100,38 +106,14 @@ const nameMap = {
   'Ballistic': '弹道',
   'Conduit': '导管',
   'Alter': '变幻',
-  'Sparrow': '琉雀'
-}
-
-// 英雄强度排名表（基于最新的第25赛季数据）
-const legendRankMap = {
-  '罗芭': 'S',           // Loba
-  '地平线': 'S',         // Horizon
-  '动力小子': 'S',       // Octane
-  '瓦尔基里': 'A',       // Valkyrie
-  '命脉': 'A',           // Lifeline
-  '恶灵': 'A',           // Wraith
-  '探路者': 'A',         // Pathfinder
-  '艾许': 'B',           // Ash
-  '希尔': 'B',           // Seer
-  '密客': 'B',           // Crypto
-  '沃特森': 'B',         // Wattson
-  '寻血猎犬': 'B',       // Bloodhound
-  '班加罗尔': 'C',       // Bangalore
-  '纽卡斯尔': 'C',       // Newcastle
-  '暴雷': 'C',           // Fuse
-  '直布罗陀': 'C',       // Gibraltar
-  '弹道': 'D',           // Ballistic
-  '侵蚀': 'D',           // Caustic
-  '亡灵': 'D',           // Revenant
-  '疯玛吉': 'D',         // Mad Maggie
-  '幻象': 'D',           // Mirage
-  '兰伯特': 'D',         // Rampart
-  '导管': 'D',           // Conduit
-  '卡特莉丝': 'D',       // Catalyst
-  '万蒂奇': 'D',         // Vantage
-  '变幻': 'C',           // Alter
-  '琉雀': 'B'            // Sparrow
+  'Sparrow': '琉雀',
+  // 统计数据名称翻译
+  'BR Kills': '击杀数',
+  'BR Wins': '胜场数',
+  'BR Damage': '造成伤害',
+  'kills': '击杀数',
+  'wins': '胜场数',
+  'damage': '造成伤害'
 }
 
 // 翻译函数
@@ -141,12 +123,8 @@ function translate(name: string): string {
 
 // 检查字符串是否包含指定模式
 function containsPattern(text: string, pattern: string): boolean {
+  if (!text) return false
   return text.toLowerCase().includes(pattern.toLowerCase())
-}
-
-// 获取英雄排名等级
-function getLegendRank(legendName: string): string {
-  return legendRankMap[legendName] || '未知'
 }
 
 // 检查玩家ID是否在黑名单中
@@ -156,6 +134,17 @@ function isBlacklisted(playerName: string, blacklist: string): boolean {
   // 转换为小写并按逗号分割
   const blacklistArray = blacklist.toLowerCase().split(',').map(item => item.trim())
   return blacklistArray.includes(playerName.toLowerCase())
+}
+
+// 判断分数变化是否异常（从高分掉到接近0分）
+function isScoreDropAbnormal(oldScore: number, newScore: number): boolean {
+  return oldScore > 1000 && newScore < 10 && newScore < oldScore
+}
+
+// 判断是否为赛季重置
+function isLikelySeasonReset(oldScore: number, newScore: number): boolean {
+  // 下降超过1000分，但不是掉到接近0分，可能是赛季重置
+  return newScore < oldScore && (oldScore - newScore) > 1000 && newScore >= 10
 }
 
 export function apply(ctx: Context, config: Config) {
@@ -332,9 +321,8 @@ export function apply(ctx: Context, config: Config) {
       helpText += `⏱️ 监控说明：\n`
       helpText += `   系统会每 ${config.checkInterval} 分钟检查一次玩家段位变化\n`
       helpText += `   当玩家段位分数发生变化时，会在群内发送通知\n`
-      helpText += `   分数变化异常判断：下降超过 ${config.maxScoreDropThreshold} 分将被视为异常\n`
+      helpText += `   分数异常判断：仅当高分(>1000)掉到接近0分(<10)时才判定为异常\n`
       helpText += `   最小有效分数：${config.minValidScore} 分以下的分数将被视为无效\n`
-      helpText += `   英雄强度等级：S>A>B>C>D，基于第25赛季数据\n`
       
       // 只有在黑名单中有条目时才添加黑名单信息
       if (config.blacklist && config.blacklist.trim() !== '') {
@@ -423,7 +411,7 @@ export function apply(ctx: Context, config: Config) {
           rankDiv: playerData.rankDiv,
           globalRankPercent: playerData.globalRankPercent,
           selectedLegend: playerData.selectedLegend,
-          legendRank: playerData.legendRank,
+          legendStats: playerData.legendStats,
           lastChecked: Date.now()
         }
         
@@ -465,18 +453,16 @@ export function apply(ctx: Context, config: Config) {
         response += `   🔢 分数: ${player.rankScore}\n`
         
         if (player.globalRankPercent && player.globalRankPercent !== '未知') {
-          response += `   🌎 全球排名: 前 ${player.globalRankPercent}%\n`
+          response += `   🌎 全球排名: ${player.globalRankPercent}%\n`
         }
         
         if (player.selectedLegend) {
-          response += `   🎮 当前英雄: ${player.selectedLegend}`
+          response += `   🎮 当前英雄: ${player.selectedLegend}\n`
           
-          // 如果有英雄排名信息，则显示
-          if (player.legendRank && player.legendRank !== '未知') {
-            response += ` (${player.legendRank}级)`
+          // 显示英雄击杀排名信息（如果有）
+          if (player.legendStats && player.legendStats.kills) {
+            response += `   📊 击杀排名: 全球 ${player.legendStats.kills.globalPercent}%\n`
           }
-          
-          response += `\n`
         }
         
         response += `\n`
@@ -484,7 +470,7 @@ export function apply(ctx: Context, config: Config) {
       
       response += `总计: ${Object.keys(players).length} 个玩家\n`
       response += `检测间隔: ${config.checkInterval} 分钟\n`
-      response += `分数下降阈值: ${config.maxScoreDropThreshold} 分\n`
+      response += `分数异常判断: 仅当高分(>1000)掉到接近0分(<10)时判定为异常\n`
       response += `最小有效分数: ${config.minValidScore} 分`
       
       return response
@@ -546,11 +532,12 @@ export function apply(ctx: Context, config: Config) {
           
           const isValidScore = newRankScore >= config.minValidScore
           
-          const diff = newRankScore - oldRankScore
+          // 使用辅助函数判断分数变化是否异常
+          const isAbnormalDrop = isScoreDropAbnormal(oldRankScore, newRankScore)
+          const isSeasonReset = isLikelySeasonReset(oldRankScore, newRankScore)
           
-          const isDroppingTooMuch = diff < 0 && Math.abs(diff) > config.maxScoreDropThreshold
-          
-          if (isValidScore && !isDroppingTooMuch && newRankScore !== oldRankScore) {
+          if (isValidScore && !isAbnormalDrop && newRankScore !== oldRankScore) {
+            const diff = newRankScore - oldRankScore
             const diffText = diff > 0 ? `上升 ${diff}` : `下降 ${Math.abs(diff)}`
             
             player.rankScore = newRankScore
@@ -558,7 +545,7 @@ export function apply(ctx: Context, config: Config) {
             player.rankDiv = playerData.rankDiv
             player.globalRankPercent = playerData.globalRankPercent
             player.selectedLegend = playerData.selectedLegend
-            player.legendRank = playerData.legendRank
+            player.legendStats = playerData.legendStats
             player.lastChecked = Date.now()
             
             const now = new Date()
@@ -574,17 +561,22 @@ export function apply(ctx: Context, config: Config) {
             message += `🏆 段位：${newRankDisplay}\n`
             message += `📊 变动：${diffText} 分`
             
-            if (playerData.globalRankPercent && playerData.globalRankPercent !== '未知') {
-              message += `\n🌎 全球排名：前 ${playerData.globalRankPercent}%`
+            // 如果可能是赛季重置，添加提示
+            if (isSeasonReset) {
+              message += `\n⚠️ 注意：检测到大幅度分数下降，可能是赛季重置导致`
             }
             
-            // 只有玩家在线时才显示当前英雄和英雄强度等级
+            if (playerData.globalRankPercent && playerData.globalRankPercent !== '未知') {
+              message += `\n🌎 全球排名：${playerData.globalRankPercent}%`
+            }
+            
+            // 只有玩家在线时才显示当前英雄和击杀排名
             if (playerData.isOnline === '在线' && playerData.selectedLegend) {
               message += `\n🎮 当前英雄：${playerData.selectedLegend}`
               
-              // 如果有英雄排名，添加英雄强度等级信息
-              if (playerData.legendRank && playerData.legendRank !== '未知') {
-                message += ` (${playerData.legendRank}级)`
+              // 显示英雄击杀排名（如果有）
+              if (playerData.legendStats && playerData.legendStats.kills) {
+                message += `\n📊 击杀排名：全球 ${playerData.legendStats.kills.globalPercent}%`
               }
             }
             
@@ -603,8 +595,8 @@ export function apply(ctx: Context, config: Config) {
             saveGroupData()
           } else if (!isValidScore) {
             ctx.logger.warn(`玩家 ${player.playerName} 的分数 ${newRankScore} 无效，保留原分数 ${oldRankScore}`)
-          } else if (isDroppingTooMuch) {
-            ctx.logger.warn(`玩家 ${player.playerName} 的分数从 ${oldRankScore} 下降到 ${newRankScore}，下降幅度异常，可能是API错误`)
+          } else if (isAbnormalDrop) {
+            ctx.logger.warn(`玩家 ${player.playerName} 的分数从 ${oldRankScore} 下降到 ${newRankScore}，从高分掉到接近0分，可能是API错误`)
           }
         } catch (error) {
           ctx.logger.error(`检查玩家 ${player.playerName} 排名失败:`, error)
@@ -637,6 +629,7 @@ export function apply(ctx: Context, config: Config) {
       const globalData = data.global || {}
       const realtimeData = data.realtime || {}
       const rankData = globalData.rank || {}
+      const legendsData = data.legends || {}
       
       // 解析状态文本
       const isOnlineStatus = realtimeData.isOnline === 1 ? '在线' : '离线'
@@ -645,10 +638,29 @@ export function apply(ctx: Context, config: Config) {
       const globalRankPercent = rankData.ALStopPercentGlobal || '未知'
       
       // 获取当前使用英雄
-      const selectedLegend = translate(realtimeData.selectedLegend || '')
+      const selectedLegendName = realtimeData.selectedLegend || ''
+      const selectedLegend = translate(selectedLegendName)
       
-      // 获取英雄强度等级
-      const legendRank = getLegendRank(selectedLegend)
+      // 初始化英雄击杀排名数据
+      let legendStats = null
+      
+      // 检查当前选择的英雄数据是否存在
+      if (legendsData && legendsData.selected && legendsData.selected.data) {
+        const legendStatsData = legendsData.selected.data
+        
+        // 查找英雄击杀排名数据
+        for (const stat of legendStatsData) {
+          if ((stat.name === 'BR Kills' || stat.key === 'specialEvent_kills') && stat.rank && stat.rank.topPercent) {
+            legendStats = {
+              kills: {
+                value: stat.value,
+                globalPercent: stat.rank.topPercent.toFixed(2)
+              }
+            }
+            break
+          }
+        }
+      }
       
       // 解析并翻译当前状态文本
       let currentState = realtimeData.currentStateAsText || realtimeData.currentState || 'offline'
@@ -683,10 +695,10 @@ export function apply(ctx: Context, config: Config) {
         globalRankPercent: globalRankPercent,
         isOnline: isOnlineStatus,
         selectedLegend: selectedLegend,
-        legendRank: legendRank,  // 添加英雄强度等级
+        legendStats: legendStats,  // 添加英雄击杀排名数据
         currentState: translatedState,
         // 添加一个字段来标识玩家是否在大厅或比赛中
-        isInLobbyOrMatch: containsPattern(currentState, 'lobby') || containsPattern(currentState, 'match')
+        isInLobbyOrMatch: containsPattern(translatedState, '大厅') || containsPattern(translatedState, '比赛')
       }
     } catch (error) {
       ctx.logger.error('API 请求失败:', error)
@@ -714,7 +726,7 @@ export function apply(ctx: Context, config: Config) {
     message += `🔢 分数：${playerData.rankScore}\n`
     
     if (playerData.globalRankPercent && playerData.globalRankPercent !== '未知') {
-      message += `🌎 全球排名：前 ${playerData.globalRankPercent}%\n`
+      message += `🌎 全球排名：${playerData.globalRankPercent}%\n`
     }
     
     message += `👑 等级：${playerData.level}\n`
@@ -725,14 +737,12 @@ export function apply(ctx: Context, config: Config) {
       
       // 只有在玩家在线时才显示当前使用的英雄
       if (playerData.selectedLegend) {
-        message += `🎯 当前英雄：${playerData.selectedLegend}`
+        message += `🎯 当前英雄：${playerData.selectedLegend}\n`
         
-        // 如果有英雄排名，添加英雄强度等级信息
-        if (playerData.legendRank && playerData.legendRank !== '未知') {
-          message += ` (${playerData.legendRank}级)`
+        // 显示英雄击杀排名（如果有）
+        if (playerData.legendStats && playerData.legendStats.kills) {
+          message += `📊 击杀排名：全球 ${playerData.legendStats.kills.globalPercent}%\n`
         }
-        
-        message += `\n`
       }
       
       // 只有在玩家在大厅或比赛中时才显示当前状态
