@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Bot, Context, Logger, Session, h, type Fragment } from 'koishi'
 import { ApexApiClient, PlayerNotFoundError } from './api'
 import { ResolvedConfig } from './config'
@@ -201,7 +202,7 @@ export class ApexRankWatchRuntime {
         const suffix = groupId ? '\n\ud83d\udd15 \u5173\u95ed\u8d5b\u5b63\u5173\u952e\u8bcd\u56de\u590d\uff1a/\u8d5b\u5b63\u5173\u95ed' : ''
         try {
           const imagePath = await this.imageRenderer.renderSeasonInfo(seasonInfo)
-          return `${h.image(imagePath)}${suffix}`
+          return `${this.imageMessage(imagePath)}${suffix}`
         } catch {
           return `${this.formatSeasonInfo(seasonInfo)}${suffix}`
         }
@@ -221,6 +222,13 @@ export class ApexRankWatchRuntime {
 
   private timeLine() {
     return `\ud83d\udd52 \u65f6\u95f4: ${formatNow()}`
+  }
+
+  private imageMessage(imagePath: string) {
+    const src = /^(?:https?|data|file|base64):/i.test(imagePath)
+      ? imagePath
+      : pathToFileURL(imagePath).href
+    return h.image(src)
   }
 
   private getUserId(session: CommandSession) {
@@ -455,7 +463,7 @@ export class ApexRankWatchRuntime {
 
     try {
       const imagePath = await this.imageRenderer.renderHelp(this.imageRenderOptions())
-      return h.image(imagePath)
+      return this.imageMessage(imagePath)
     } catch (error) {
       this.logger.error(`help image render failed: ${String((error as Error)?.message || error)}`)
     }
@@ -524,7 +532,7 @@ export class ApexRankWatchRuntime {
       player.platform = usedPlatform
       try {
         const imagePath = await this.imageRenderer.renderPlayerRank(player)
-        return h.image(imagePath)
+        return this.imageMessage(imagePath)
       } catch (error) {
         this.logger.error(`player rank image render failed: ${String((error as Error)?.message || error)}`)
         return this.formatPlayerRankText(player)
@@ -547,7 +555,7 @@ export class ApexRankWatchRuntime {
       const rotationInfo = await this.api.fetchMapRotationInfo()
       try {
         const imagePath = await this.imageRenderer.renderMapRotation(rotationInfo, mode)
-        return h.image(imagePath)
+        return this.imageMessage(imagePath)
       } catch (error) {
         this.logger.error(`map rotation image render failed: ${String((error as Error)?.message || error)}`)
         return this.formatMapRotationText(rotationInfo, mode)
@@ -579,7 +587,7 @@ export class ApexRankWatchRuntime {
       }
       try {
         const imagePath = await this.imageRenderer.renderPredatorInfo(predatorInfo)
-        return h.image(imagePath)
+        return this.imageMessage(imagePath)
       } catch (error) {
         this.logger.error(`predator image render failed: ${String((error as Error)?.message || error)}`)
         return this.formatPredatorInfoText(predatorInfo, selectedPlatform)
@@ -606,7 +614,7 @@ export class ApexRankWatchRuntime {
       const seasonInfo = await this.api.fetchSeasonInfo(seasonNumber)
       try {
         const imagePath = await this.imageRenderer.renderSeasonInfo(seasonInfo)
-        return h.image(imagePath)
+        return this.imageMessage(imagePath)
       } catch (error) {
         this.logger.error(`season image render failed: ${String((error as Error)?.message || error)}`)
         return this.formatSeasonInfo(seasonInfo)
@@ -754,7 +762,7 @@ export class ApexRankWatchRuntime {
       await this.sendToTarget(target, `\u2705 \u6d4b\u8bd5\u6d88\u606f\uff1a\u5df2\u6dfb\u52a0\u5bf9 ${player.name} \u7684\u6392\u540d\u76d1\u63a7\u3002`)
       try {
         const imagePath = await this.imageRenderer.renderMonitorAdded(player, normalizedPlatform, this.imageRenderOptions())
-        return h.image(imagePath)
+        return this.imageMessage(imagePath)
       } catch (error) {
         this.logger.error(`monitor added image render failed: ${String((error as Error)?.message || error)}`)
       }
@@ -791,7 +799,7 @@ export class ApexRankWatchRuntime {
 
     try {
       const imagePath = await this.imageRenderer.renderWatchList(Object.values(group.players), this.imageRenderOptions())
-      return h.image(imagePath)
+      return this.imageMessage(imagePath)
     } catch (error) {
       this.logger.error(`watch list image render failed: ${String((error as Error)?.message || error)}`)
     }
@@ -1079,7 +1087,7 @@ export class ApexRankWatchRuntime {
       if (playerData.currentState) lines.push(`\ud83c\udfae \u5f53\u524d\u72b6\u6001: ${playerData.currentState}`)
       try {
         const imagePath = await this.imageRenderer.renderRankChange(playerData, oldScore, newScore, player.platform, seasonReset)
-        await this.sendToTarget(group.target, h.image(imagePath))
+        await this.sendToTarget(group.target, this.imageMessage(imagePath))
       } catch (error) {
         this.logger.error(`rank change image render failed: ${String((error as Error)?.message || error)}`)
         await this.sendToTarget(group.target, lines.join('\n'))

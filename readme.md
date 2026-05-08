@@ -9,7 +9,7 @@ Koishi 版 Apex Rank Watch。填入 Apex Legends API Key 后，机器人可以�
 
 2.0 版迁移了 AstrBot 版的图片卡片、地图、赛季、猎杀线、黑名单、权限与赛季关键词自动回复能力，同时保留 Koishi 版独有的 `/apexremark` 备注功能。
 
-当前版本：`2.0.0`，作者：`moeneri`。
+当前版本：`2.0.1`。
 
 ## 快速开始
 
@@ -176,6 +176,7 @@ Koishi 控制台会按分组展示配置项。推荐使用 camelCase 字段；�
 - 赛季时间会统一按北京时间展示。
 - 监控通知依赖 Koishi 适配器的主动消息能力；如果当前平台不支持主动消息，查询命令仍可正常使用。
 - 插件使用 `@napi-rs/canvas` 生成图片，并随 npm 包发布 `assets/` 素材目录。如果部署环境缺少对应平台的 canvas 原生包，请先确认 Node.js 版本和系统架构。
+- 在 Koishi 沙箱里测试图片消息时，请在沙箱插件配置中开启 `fileServer.enabled`，否则浏览器无法读取机器人返回的本地图片文件。
 
 ## 开发与测试
 
@@ -183,20 +184,6 @@ Koishi 控制台会按分组展示配置项。推荐使用 camelCase 字段；�
 npm test
 npm run build
 npm pack --dry-run
-```
-
-Live API 测试只从本地环境变量读取 Key，不要写入仓库：
-
-```bash
-APEX_API_KEY=你的Key npm run test:live
-```
-
-Windows PowerShell：
-
-```powershell
-$env:APEX_API_KEY = '你的Key'
-npm run test:live
-Remove-Item Env:\APEX_API_KEY
 ```
 
 ## 链接
