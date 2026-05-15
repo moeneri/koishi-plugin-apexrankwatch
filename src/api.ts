@@ -187,7 +187,13 @@ export class ApexApiClient {
     const homeHtml = await this.requestText(homeUrl)
     const references = extractSeasonReferences(homeHtml)
     const target = references.find((entry) => entry.seasonNumber === seasonNumber)
-    if (!target) throw new Error(`未找到 S${seasonNumber} 的赛季数据`)
+    if (!target) {
+      try {
+        const current = await this.fetchSeasonInfo()
+        if (current.seasonNumber === seasonNumber) return current
+      } catch {}
+      throw new Error(`未找到 S${seasonNumber} 的赛季数据`)
+    }
     const detailHtml = target.seasonUrl ? await this.requestText(target.seasonUrl) : ''
     const seasonInfo: SeasonInfo = {
       seasonNumber: target.seasonNumber,

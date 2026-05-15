@@ -145,6 +145,37 @@ test('fetchDailyMapSchedule keeps API anchors and infers the remaining ranked da
   assert.match(schedule.sourceNote, /闭环/)
 })
 
+test('fetchSeasonInfo falls back to the current season source when numeric current season is missing from history source', async () => {
+  const requestedUrls: string[] = []
+  const client = new ApexApiClient({
+    apiKey: 'test-key',
+    timeoutMs: 1000,
+    maxRetries: 0,
+    debugLogging: false,
+    logger,
+    fetcher: async (url) => {
+      requestedUrls.push(url)
+      if (url.includes('apexseasons.online')) {
+        return new Response('<html><body>No Season 29 entry yet</body></html>', { status: 200 })
+      }
+      if (url.includes('apexlegendsstatus.com/new-season-countdown')) {
+        return new Response(
+          '<html><head><meta property="og:title" content="Countdown to Season 29: Overclocked"></head><body><script>startTime = 1778019600</script></body></html>',
+          { status: 200 },
+        )
+      }
+      throw new Error(`unexpected url: ${url}`)
+    },
+  })
+
+  const season = await client.fetchSeasonInfo(29)
+
+  assert.equal(season.seasonNumber, 29)
+  assert.equal(season.seasonName, 'Overclocked')
+  assert.equal(season.source, 'apexlegendsstatus.com')
+  assert.ok(requestedUrls.some((url) => url.includes('apexlegendsstatus.com/new-season-countdown')))
+})
+
 test('daily map schedule card renders a non-empty long PNG', async () => {
   const renderer = new ApexImageRenderer(await mkdtemp(join(tmpdir(), 'apexrankwatch-daily-map-')))
   const filePath = await renderer.renderDailyMapSchedule({

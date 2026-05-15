@@ -66,7 +66,7 @@ const listSchema = (description: string) => Schema.array(Schema.string()).role('
 export const ConfigSchema = Schema.intersect([
   Schema.object({
     apiKey: Schema.string().role('secret').default('').description('Apex Legends API Key。留空时插件仍可加载，但玩家查询、监控和猎杀线功能不可用。'),
-    debugLogging: Schema.boolean().default(false).description('输出脱敏调试日志，用于排查 API 返回结构和错误原因。'),
+    debugLogging: Schema.boolean().default(false).description('输出安全调试日志，用于排查 API 返回结构和错误原因。'),
   }).description('API 设置'),
 
   Schema.object({

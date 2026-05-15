@@ -7,7 +7,7 @@
 
 Koishi 版 Apex Rank Watch。填入 Apex Legends API Key 后，机器人可以查询玩家段位、地图轮换、赛季时间、猎杀线，并在群聊中持续监控排位分变化。
 
-2.1 版在 2.0 图片卡片、地图、赛季、猎杀线、黑名单、权限与赛季关键词自动回复能力基础上，补齐 AstrBot 版 `/全天地图`、地图池学习闭环、字体检测下载和显式文字输出模式，同时保留 Koishi 版独有的 `/apexremark` 备注功能。
+2.1 版新增 `/全天地图`、地图池学习、字体检测下载和显式文字输出模式，并保留 `/apexremark` 备注功能。
 
 当前版本：`2.1.0`。
 
@@ -44,9 +44,7 @@ yarn add koishi-plugin-apexrankwatch
 
 ## 实际效果
 
-下图是使用真实 API 与 Koishi 沙箱命令生成的图片合集，包含玩家查询、分数变化、监控添加、监控列表、地图、赛季和猎杀线卡片。
-
-![常用命令效果总览](assets/readme/command_effects_overview.png)
+![常用命令效果总览](https://raw.githubusercontent.com/moeneri/koishi-plugin-apexrankwatch/master/assets/readme/command_effects_overview.png)
 
 ## 功能亮点
 
@@ -134,7 +132,7 @@ Koishi 控制台会按分组展示配置项。推荐使用 camelCase 字段；�
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `apiKey` | 空 | Apex Legends API Key。 |
-| `debugLogging` | `false` | 输出脱敏调试日志，用于排查 API 返回结构和错误原因。 |
+| `debugLogging` | `false` | 输出安全调试日志，用于排查 API 返回结构和错误原因。 |
 | `checkInterval` | `2` | 排位分监控轮询间隔，单位为分钟。 |
 | `timeout` | `10000` | HTTP 请求超时时间，单位为毫秒。 |
 | `maxRetries` | `3` | API 请求失败后的最大重试次数。 |
