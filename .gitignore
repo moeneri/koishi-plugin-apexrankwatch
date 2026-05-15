@@ -2,7 +2,6 @@ lib
 dist
 external
 data
-test
 *.tgz
 .env
 .env.*

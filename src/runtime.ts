@@ -2,12 +2,15 @@ import { mkdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Bot, Context, Logger, Session, h, type Fragment } from 'koishi'
-import { ApexApiClient, PlayerNotFoundError } from './api'
+import { ApexApiClient, PlayerNotFoundError, defaultDailyMapPoolState } from './api'
 import { ResolvedConfig } from './config'
+import { FontManager } from './font'
 import { ApexImageRenderer } from './image'
-import { GroupStore, SettingsStore } from './storage'
+import { DailyMapPoolStore, GroupStore, SettingsStore } from './storage'
 import {
   ApexPlayerStats,
+  DailyMapPoolState,
+  DailyMapScheduleInfo,
   MapRotationInfo,
   NotificationTarget,
   RuntimeSettings,
@@ -34,9 +37,12 @@ export class ApexRankWatchRuntime {
   private readonly dataDir: string
   private readonly groupsFile: string
   private readonly settingsFile: string
+  private readonly dailyMapPoolFile: string
   private readonly groupStore: GroupStore
   private readonly settingsStore: SettingsStore
+  private readonly dailyMapPoolStore: DailyMapPoolStore
   private readonly imageRenderer: ApexImageRenderer
+  private readonly fontManager: FontManager
   private readonly api: ApexApiClient
   private readonly configBlacklist: Set<string>
   private readonly queryBlocklist: Set<string>
@@ -48,6 +54,7 @@ export class ApexRankWatchRuntime {
     runtimeBlacklist: [],
     seasonKeywordDisabledGroups: [],
   }
+  private dailyMapPoolState: DailyMapPoolState = defaultDailyMapPoolState()
 
   constructor(
     private readonly ctx: Context,
@@ -56,9 +63,17 @@ export class ApexRankWatchRuntime {
     this.dataDir = resolve(process.cwd(), this.config.dataDir)
     this.groupsFile = resolve(this.dataDir, 'groups.json')
     this.settingsFile = resolve(this.dataDir, 'settings.json')
+    this.dailyMapPoolFile = resolve(this.dataDir, 'daily_map_pool_state.json')
     this.groupStore = new GroupStore(this.groupsFile, this.logger)
     this.settingsStore = new SettingsStore(this.settingsFile, this.logger)
+    this.dailyMapPoolStore = new DailyMapPoolStore(this.dailyMapPoolFile, this.logger)
     this.imageRenderer = new ApexImageRenderer(this.dataDir)
+    this.fontManager = new FontManager({
+      dataDir: this.dataDir,
+      enabled: this.config.fontAutoDownload,
+      downloadUrl: this.config.fontDownloadUrl,
+      logger: this.logger,
+    })
     this.api = new ApexApiClient({
       apiKey: this.config.apiKey,
       timeoutMs: this.config.timeoutMs,
@@ -91,6 +106,7 @@ export class ApexRankWatchRuntime {
     await mkdir(this.dataDir, { recursive: true })
     await this.groupStore.load()
     this.settings = await this.settingsStore.load()
+    this.dailyMapPoolState = await this.dailyMapPoolStore.load()
     await this.migrateStoreKeys()
 
     this.ctx.setInterval(() => {
@@ -99,8 +115,17 @@ export class ApexRankWatchRuntime {
       })
     }, this.config.checkInterval * 60_000)
 
+    this.ctx.setInterval(() => {
+      void this.dailyMapLearningTick().catch((error) => {
+        this.logger.error(`daily map learning task failed: ${String((error as Error)?.message || error)}`)
+      })
+    }, 60 * 60_000)
+
     void this.pollOnce().catch((error) => {
       this.logger.error(`initial poll failed: ${String((error as Error)?.message || error)}`)
+    })
+    void this.dailyMapLearningTick().catch((error) => {
+      this.logger.error(`initial daily map learning failed: ${String((error as Error)?.message || error)}`)
     })
 
     this.logger.info(`Apex Rank Watch loaded, interval ${this.config.checkInterval} minute(s)`)
@@ -113,68 +138,82 @@ export class ApexRankWatchRuntime {
   }
 
   private registerCommands() {
-    this.ctx.command('apextest', 'test plugin health')
+    this.ctx.command('apextest', '测试插件状态与主动消息能力')
       .alias('apex\u6d4b\u8bd5')
       .action(this.wrap(async (session) => this.handleTest(session)))
 
-    this.ctx.command('apexhelp', 'show plugin help')
+    this.ctx.command('apexhelp', '查看 Apex Rank Watch 帮助')
       .alias('apex\u5e2e\u52a9')
       .alias('apexrankhelp')
       .action(this.wrap(async (session) => this.handleHelp(session)))
 
-    this.ctx.command('apexrank [input:text]', 'query current rank')
+    this.ctx.command('apex_download', '检测或下载中文字体缓存')
+      .alias('apexdownload')
+      .alias('apexfont')
+      .alias('apex\u5b57\u4f53')
+      .alias('apex\u5b57\u4f53\u4e0b\u8f7d')
+      .action(this.wrap(async (session) => this.handleFontDownload(session)))
+
+    this.ctx.command('apexrank [input:text]', '查询 Apex 玩家段位信息')
       .alias('apex\u67e5\u8be2')
       .alias('\u89c6\u5978')
       .action(this.wrap(async (session, input = '') => this.handleRankQuery(session, input)))
 
-    this.ctx.command('apexrankwatch [input:text]', 'watch player rank in current group')
+    this.ctx.command('apexrankwatch [input:text]', '在当前群持续监控玩家段位变化')
       .alias('apex\u76d1\u63a7')
       .alias('\u6301\u7eed\u89c6\u5978')
       .action(this.wrap(async (session, input = '') => this.handleWatch(session, input)))
 
-    this.ctx.command('apexranklist', 'show watch list')
+    this.ctx.command('apexranklist', '查看当前群段位监控列表')
       .alias('apex\u5217\u8868')
       .action(this.wrap(async (session) => this.handleList(session)))
 
-    this.ctx.command('apexremark <player> [platformOrRemark:text]', 'set a remark for a watched player')
+    this.ctx.command('apexremark <player> [platformOrRemark:text]', '设置或清除监控玩家备注')
       .alias('apex\u5907\u6ce8')
       .action(this.wrap(async (session, player, remark) => this.handleRemark(session, player || '', remark || '')))
 
-    this.ctx.command('apexrankremove [input:text]', 'remove a watch target')
+    this.ctx.command('apexrankremove [input:text]', '移除当前群的玩家段位监控')
       .alias('apex\u79fb\u9664')
       .alias('\u53d6\u6d88\u6301\u7eed\u89c6\u5978')
       .action(this.wrap(async (session, input = '') => this.handleRemove(session, input)))
 
-    this.ctx.command('apexpredator [platform:string]', 'query predator threshold')
+    this.ctx.command('apexpredator [platform:string]', '查询猎杀线与大师人数')
       .alias('apex\u730e\u6740')
       .alias('\u730e\u6740')
       .action(this.wrap(async (session, platform = '') => this.handlePredator(session, platform)))
 
-    this.ctx.command('apexseason [season:string]', 'query current season time')
+    this.ctx.command('apexseason [season:string]', '查询 Apex 赛季时间')
       .alias('apex\u8d5b\u5b63')
       .alias('\u65b0\u8d5b\u5b63')
       .action(this.wrap(async (session, season = '') => this.handleSeason(session, season)))
 
-    this.ctx.command('map', 'query ranked map rotation')
+    this.ctx.command('map', '查询排位地图轮换')
       .alias('\u5730\u56fe')
       .alias('\u6392\u4f4d\u5730\u56fe')
       .alias('apexmap')
       .alias('apexrankmap')
       .action(this.wrap(async (session) => this.handleMap(session, 'ranked')))
 
-    this.ctx.command('\u5339\u914d\u5730\u56fe', 'query battle royale map rotation')
+    this.ctx.command('\u5339\u914d\u5730\u56fe', '查询三人赛匹配地图轮换')
       .action(this.wrap(async (session) => this.handleMap(session, 'battle_royale')))
 
-    this.ctx.command('apexblacklist [action:string] [input:text]', 'manage runtime blacklist')
+    this.ctx.command('\u5168\u5929\u5730\u56fe', '查询未来 24 小时排位地图排期')
+      .alias('\u5168\u5929\u6392\u4f4d\u5730\u56fe')
+      .alias('\u4eca\u65e5\u5730\u56fe')
+      .alias('\u4eca\u65e5\u6392\u4f4d\u5730\u56fe')
+      .alias('dailymap')
+      .action(this.wrap(async (session) => this.handleDailyMap(session)))
+
+    this.ctx.command('apexblacklist [action:string] [input:text]', '管理运行时玩家黑名单')
       .alias('apex\u9ed1\u540d\u5355')
       .alias('\u4e0d\u51c6\u89c6\u5978')
       .alias('apexban')
       .action(this.wrap(async (session, action = '', input = '') => this.handleBlacklist(session, action, input)))
 
-    this.ctx.command('\u8d5b\u5b63\u5173\u95ed', 'disable season keyword reply in this group')
+    this.ctx.command('\u8d5b\u5b63\u5173\u95ed', '关闭当前群赛季关键词自动回复')
       .action(this.wrap(async (session) => this.handleSeasonKeywordToggle(session, true)))
 
-    this.ctx.command('\u8d5b\u5b63\u5f00\u542f', 'enable season keyword reply in this group')
+    this.ctx.command('\u8d5b\u5b63\u5f00\u542f', '开启当前群赛季关键词自动回复')
       .action(this.wrap(async (session) => this.handleSeasonKeywordToggle(session, false)))
   }
 
@@ -201,6 +240,8 @@ export class ApexRankWatchRuntime {
         const seasonInfo = await this.api.fetchSeasonInfo()
         const suffix = groupId ? '\n\ud83d\udd15 \u5173\u95ed\u8d5b\u5b63\u5173\u952e\u8bcd\u56de\u590d\uff1a/\u8d5b\u5b63\u5173\u95ed' : ''
         try {
+          if (this.isTextOutputMode()) return `${this.formatSeasonInfo(seasonInfo)}${suffix}`
+          await this.prepareImageOutput()
           const imagePath = await this.imageRenderer.renderSeasonInfo(seasonInfo)
           return `${this.imageMessage(imagePath)}${suffix}`
         } catch {
@@ -441,6 +482,14 @@ export class ApexRankWatchRuntime {
     }
   }
 
+  private isTextOutputMode() {
+    return this.config.outputMode === 'text'
+  }
+
+  private async prepareImageOutput() {
+    await this.fontManager.ensureAvailable()
+  }
+
   private async handleTest(session: CommandSession) {
     const deny = this.guardAccess(session)
     if (deny) return [this.timeLine(), deny].join('\n')
@@ -461,11 +510,14 @@ export class ApexRankWatchRuntime {
     const deny = this.guardAccess(session)
     if (deny) return [this.timeLine(), deny].join('\n')
 
-    try {
-      const imagePath = await this.imageRenderer.renderHelp(this.imageRenderOptions())
-      return this.imageMessage(imagePath)
-    } catch (error) {
-      this.logger.error(`help image render failed: ${String((error as Error)?.message || error)}`)
+    if (!this.isTextOutputMode()) {
+      try {
+        await this.prepareImageOutput()
+        const imagePath = await this.imageRenderer.renderHelp(this.imageRenderOptions())
+        return this.imageMessage(imagePath)
+      } catch (error) {
+        this.logger.error(`help image render failed: ${String((error as Error)?.message || error)}`)
+      }
     }
 
     const lines = [
@@ -482,11 +534,13 @@ export class ApexRankWatchRuntime {
       '\u3010\u4fe1\u606f\u3011',
       '/map  \u522b\u540d\uff1a/\u5730\u56fe /\u6392\u4f4d\u5730\u56fe /apexmap /apexrankmap',
       '/\u5339\u914d\u5730\u56fe',
+      '/\u5168\u5929\u5730\u56fe  \u522b\u540d\uff1a/\u4eca\u65e5\u5730\u56fe /dailymap',
       '/apexpredator [\u5e73\u53f0]  \u522b\u540d\uff1a/apex\u730e\u6740 /\u730e\u6740',
       '/apexseason [\u8d5b\u5b63\u53f7|current]  \u522b\u540d\uff1a/apex\u8d5b\u5b63 /\u65b0\u8d5b\u5b63',
       '\u5173\u952e\u8bcd\uff1a\u6d88\u606f\u5305\u542b\u201c\u8d5b\u5b63\u201d\u81ea\u52a8\u56de\u590d\uff08/\u8d5b\u5b63\u5173\u95ed\uff0c/\u8d5b\u5b63\u5f00\u542f\uff09',
       '\u3010\u7ba1\u7406\u3011',
       '/apexblacklist <add|remove|list|clear> <\u73a9\u5bb6ID>  \u522b\u540d\uff1a/apex\u9ed1\u540d\u5355 /\u4e0d\u51c6\u89c6\u5978 /apexban',
+      '/apex_download  \u68c0\u6d4b\u6216\u4e0b\u8f7d\u4e2d\u6587\u5b57\u4f53\u7f13\u5b58',
       '\u3010\u53c2\u6570\u3011',
       '\u5e73\u53f0\uff1aPC / PS4 / X1 / SWITCH\uff08\u672a\u6307\u5b9a\u65f6\u6309 PC -> PS4 -> X1 -> SWITCH \u81ea\u52a8\u5c1d\u8bd5\uff09',
       'UUID\uff1a\u4f7f\u7528 uid: \u6216 uuid: \u524d\u7f00\uff0c\u4f8b\u5982 /apexrank uid:123456',
@@ -503,6 +557,44 @@ export class ApexRankWatchRuntime {
     if (this.queryBlocklist.size) {
       lines.push(`\u26d4 \u67e5\u8be2\u5c01\u7981\u73a9\u5bb6\uff1a\u5df2\u914d\u7f6e ${this.queryBlocklist.size} \u4e2a\u3002`)
     }
+    return lines.join('\n')
+  }
+
+  private async handleFontDownload(session: CommandSession) {
+    const deny = this.guardAccess(session)
+    if (deny) return [this.timeLine(), deny].join('\n')
+
+    try {
+      let status = await this.fontManager.status()
+      if (!status.available) {
+        try {
+          await this.fontManager.download(true)
+        } catch (error: any) {
+          this.logger.warn(`font download failed: ${error?.message || error}`)
+        }
+        status = await this.fontManager.status()
+      }
+      return this.formatFontStatus(status)
+    } catch (error: any) {
+      return [
+        this.timeLine(),
+        '\ud83e\udde9 Apex Rank Watch \u4e2d\u6587\u5b57\u4f53\u68c0\u6d4b',
+        `\u274c \u5b57\u4f53\u68c0\u6d4b\u6216\u4e0b\u8f7d\u5931\u8d25\uff1a${error?.message || error}`,
+        '\u8bf7\u786e\u8ba4\u670d\u52a1\u5668\u53ef\u4ee5\u8bbf\u95ee GitHub\uff0c\u6216\u5728 fontDownloadUrl \u914d\u7f6e\u955c\u50cf\u5730\u5740\u540e\u91cd\u8bd5\u3002',
+      ].join('\n')
+    }
+  }
+
+  private formatFontStatus(status: { available: boolean; source: string; path: string | null }) {
+    const lines = [this.timeLine(), '\ud83e\udde9 Apex Rank Watch \u4e2d\u6587\u5b57\u4f53\u68c0\u6d4b']
+    if (status.available) {
+      lines.push(`\u2705 \u4e2d\u6587\u5b57\u4f53\u5df2\u53ef\u7528\uff0c\u6765\u6e90\uff1a${status.source === 'system' ? '\u7cfb\u7edf\u5b57\u4f53' : '\u63d2\u4ef6\u7f13\u5b58\u5b57\u4f53'}`)
+      if (status.path) lines.push(`\u8def\u5f84\uff1a${status.path}`)
+      return lines.join('\n')
+    }
+    lines.push('\u274c \u5f53\u524d\u672a\u68c0\u6d4b\u5230\u53ef\u7528\u4e2d\u6587\u5b57\u4f53\uff0c\u56fe\u7247\u4e2d\u6587\u53ef\u80fd\u663e\u793a\u5f02\u5e38\u3002')
+    lines.push('\u5df2\u5c1d\u8bd5\u4e0b\u8f7d\u63d2\u4ef6\u5b57\u4f53\u7f13\u5b58\uff0c\u4f46\u6682\u672a\u6210\u529f\u3002')
+    lines.push('\u5982\u679c\u670d\u52a1\u5668\u65e0\u6cd5\u8bbf\u95ee GitHub\uff0c\u8bf7\u914d\u7f6e fontDownloadUrl \u955c\u50cf\u5730\u5740\u540e\u91cd\u8bd5 /apex_download\u3002')
     return lines.join('\n')
   }
 
@@ -530,7 +622,9 @@ export class ApexRankWatchRuntime {
         return [this.timeLine(), `\u26a0\ufe0f \u67e5\u8be2\u5230 ${playerName} \u7684\u5206\u6570\u4e3a ${player.rankScore}\uff0c\u4f4e\u4e8e\u6700\u4f4e\u6709\u6548\u5206\u6570 ${this.config.minValidScore}\uff0c\u53ef\u80fd\u662f API \u5f02\u5e38\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002`].join('\n')
       }
       player.platform = usedPlatform
+      if (this.isTextOutputMode()) return this.formatPlayerRankText(player)
       try {
+        await this.prepareImageOutput()
         const imagePath = await this.imageRenderer.renderPlayerRank(player)
         return this.imageMessage(imagePath)
       } catch (error) {
@@ -553,7 +647,9 @@ export class ApexRankWatchRuntime {
 
     try {
       const rotationInfo = await this.api.fetchMapRotationInfo()
+      if (this.isTextOutputMode()) return this.formatMapRotationText(rotationInfo, mode)
       try {
+        await this.prepareImageOutput()
         const imagePath = await this.imageRenderer.renderMapRotation(rotationInfo, mode)
         return this.imageMessage(imagePath)
       } catch (error) {
@@ -564,6 +660,71 @@ export class ApexRankWatchRuntime {
       this.logger.error(`map rotation query failed: ${String((error as Error)?.message || error)}`)
       return this.apiRequestFailedText(mode === 'battle_royale' ? '\u5339\u914d\u5730\u56fe\u67e5\u8be2' : '\u5730\u56fe\u8f6e\u6362\u67e5\u8be2')
     }
+  }
+
+  private async handleDailyMap(session: CommandSession) {
+    const deny = this.guardAccess(session)
+    if (deny) return [this.timeLine(), deny].join('\n')
+    if (!this.config.apiKey) return this.missingApiKeyText()
+
+    try {
+      const schedule = await this.refreshDailyMapSchedule()
+      if (!schedule.entries.length) {
+        return [
+          this.timeLine(),
+          '\u26a0\ufe0f \u6682\u672a\u83b7\u53d6\u5230\u5168\u5929\u5730\u56fe\u6392\u671f\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002',
+          '\u2139\ufe0f /map \u5f53\u524d\u5730\u56fe\u4ecd\u4f7f\u7528 API \u5b9e\u65f6\u67e5\u8be2\u3002',
+        ].join('\n')
+      }
+      if (this.isTextOutputMode()) return this.formatDailyMapScheduleText(schedule)
+      try {
+        await this.prepareImageOutput()
+        const imagePath = await this.imageRenderer.renderDailyMapSchedule(schedule)
+        return this.imageMessage(imagePath)
+      } catch (error) {
+        this.logger.error(`daily map image render failed: ${String((error as Error)?.message || error)}`)
+        return this.formatDailyMapScheduleText(schedule)
+      }
+    } catch (error) {
+      this.logger.error(`daily map query failed: ${String((error as Error)?.message || error)}`)
+      return this.apiRequestFailedText('\u5168\u5929\u5730\u56fe\u67e5\u8be2')
+    }
+  }
+
+  private async refreshDailyMapSchedule() {
+    let seasonInfo = null
+    try {
+      seasonInfo = await this.api.fetchSeasonInfo()
+    } catch (error: any) {
+      this.logger.warn(`daily map season fetch failed: ${error?.message || error}`)
+    }
+    const schedule = await this.api.fetchDailyMapSchedule('ranked', this.dailyMapPoolState, seasonInfo)
+    if (schedule.poolState) {
+      this.dailyMapPoolState = schedule.poolState
+      await this.dailyMapPoolStore.save(this.dailyMapPoolState)
+    }
+    return schedule
+  }
+
+  private async dailyMapLearningTick() {
+    if (!this.config.apiKey) return
+    if (this.dailyMapPoolState.status === 'confirmed') return
+    await this.refreshDailyMapSchedule()
+  }
+
+  private formatDailyMapScheduleText(schedule: DailyMapScheduleInfo) {
+    const lines = [
+      this.timeLine(),
+      `\ud83d\uddfa\ufe0f ${schedule.title}`,
+      `\ud83d\udcc5 \u65e5\u671f\uff1a${schedule.dateLabel}\uff08\u5317\u4eac\u65f6\u95f4\uff09`,
+      '\u2014\u2014',
+    ]
+    for (const entry of schedule.entries) {
+      const source = entry.source === 'api' ? 'API' : entry.source === 'inferred' ? '\u63a8\u65ad' : '\u7f51\u9875'
+      lines.push(`${source} ${entry.mapNameZh || entry.mapName}\uff1a${entry.readableStart} - ${entry.readableEnd}`)
+    }
+    lines.push('\u2014\u2014', `\u2139\ufe0f ${schedule.sourceNote}`, '\u2139\ufe0f /map \u5f53\u524d\u5730\u56fe\u4ecd\u4f7f\u7528 API \u5b9e\u65f6\u6570\u636e')
+    return lines.join('\n')
   }
 
   private async handlePredator(session: CommandSession, platform = '') {
@@ -585,7 +746,9 @@ export class ApexRankWatchRuntime {
       if (!predatorInfo.platforms.length) {
         return [this.timeLine(), '\u26a0\ufe0f \u6682\u672a\u83b7\u53d6\u5230\u730e\u6740\u95e8\u69db\u6570\u636e\u3002'].join('\n')
       }
+      if (this.isTextOutputMode()) return this.formatPredatorInfoText(predatorInfo, selectedPlatform)
       try {
+        await this.prepareImageOutput()
         const imagePath = await this.imageRenderer.renderPredatorInfo(predatorInfo)
         return this.imageMessage(imagePath)
       } catch (error) {
@@ -612,7 +775,9 @@ export class ApexRankWatchRuntime {
 
     try {
       const seasonInfo = await this.api.fetchSeasonInfo(seasonNumber)
+      if (this.isTextOutputMode()) return this.formatSeasonInfo(seasonInfo)
       try {
+        await this.prepareImageOutput()
         const imagePath = await this.imageRenderer.renderSeasonInfo(seasonInfo)
         return this.imageMessage(imagePath)
       } catch (error) {
@@ -760,7 +925,16 @@ export class ApexRankWatchRuntime {
       await this.groupStore.save()
 
       await this.sendToTarget(target, `\u2705 \u6d4b\u8bd5\u6d88\u606f\uff1a\u5df2\u6dfb\u52a0\u5bf9 ${player.name} \u7684\u6392\u540d\u76d1\u63a7\u3002`)
+      if (this.isTextOutputMode()) {
+        return [
+          this.timeLine(),
+          `\u2705 \u5df2\u6dfb\u52a0\u5bf9 ${player.name} \u7684\u6392\u540d\u76d1\u63a7\u3002`,
+          `\ud83d\udd79\ufe0f \u5e73\u53f0: ${formatPlatform(normalizedPlatform)}`,
+          `\ud83c\udfc6 \u5f53\u524d\u6bb5\u4f4d: ${formatRank(player.rankName, player.rankDiv)} (${player.rankScore} \u5206)`,
+        ].join('\n')
+      }
       try {
+        await this.prepareImageOutput()
         const imagePath = await this.imageRenderer.renderMonitorAdded(player, normalizedPlatform, this.imageRenderOptions())
         return this.imageMessage(imagePath)
       } catch (error) {
@@ -797,11 +971,14 @@ export class ApexRankWatchRuntime {
       return [this.timeLine(), '\u2139\ufe0f \u672c\u7fa4\u76ee\u524d\u6ca1\u6709\u76d1\u63a7\u4efb\u4f55\u73a9\u5bb6\u3002'].join('\n')
     }
 
-    try {
-      const imagePath = await this.imageRenderer.renderWatchList(Object.values(group.players), this.imageRenderOptions())
-      return this.imageMessage(imagePath)
-    } catch (error) {
-      this.logger.error(`watch list image render failed: ${String((error as Error)?.message || error)}`)
+    if (!this.isTextOutputMode()) {
+      try {
+        await this.prepareImageOutput()
+        const imagePath = await this.imageRenderer.renderWatchList(Object.values(group.players), this.imageRenderOptions())
+        return this.imageMessage(imagePath)
+      } catch (error) {
+        this.logger.error(`watch list image render failed: ${String((error as Error)?.message || error)}`)
+      }
     }
 
     const lines = [this.timeLine(), '\ud83d\udccb \u672c\u7fa4 Apex \u6392\u540d\u76d1\u63a7\u5217\u8868']
@@ -1085,7 +1262,12 @@ export class ApexRankWatchRuntime {
       if (playerData.selectedLegend) lines.push(`\ud83e\uddb8 \u5f53\u524d\u82f1\u96c4: ${playerData.selectedLegend}`)
       if (playerData.legendKillsRank) lines.push(`\ud83c\udfaf \u51fb\u6740\u6392\u540d: \u5168\u7403 ${playerData.legendKillsRank.globalPercent}%`)
       if (playerData.currentState) lines.push(`\ud83c\udfae \u5f53\u524d\u72b6\u6001: ${playerData.currentState}`)
+      if (this.isTextOutputMode()) {
+        await this.sendToTarget(group.target, lines.join('\n'))
+        return
+      }
       try {
+        await this.prepareImageOutput()
         const imagePath = await this.imageRenderer.renderRankChange(playerData, oldScore, newScore, player.platform, seasonReset)
         await this.sendToTarget(group.target, this.imageMessage(imagePath))
       } catch (error) {

@@ -4,8 +4,10 @@ import { dirname, resolve } from 'node:path'
 import { createCanvas, loadImage } from '@napi-rs/canvas'
 import {
   ApexPlayerStats,
+  DailyMapScheduleInfo,
   MapRotationEntry,
   MapRotationInfo,
+  MapScheduleEntry,
   PredatorInfo,
   PredatorPlatformInfo,
   SeasonInfo,
@@ -406,6 +408,20 @@ function displayMapName(entry: MapRotationEntry) {
   return entry.mapNameZh || entry.mapName || '未知地图'
 }
 
+function displayScheduleMapName(entry: MapScheduleEntry) {
+  return displayMapName(scheduleEntryToRotation(entry))
+}
+
+function scheduleEntryToRotation(entry: MapScheduleEntry): MapRotationEntry {
+  return {
+    mapName: entry.mapName,
+    mapNameZh: entry.mapNameZh,
+    start: entry.start,
+    end: entry.end,
+    remainingTimer: '',
+  }
+}
+
 function rankPercent(value: string) {
   const text = String(value || '').trim()
   if (!text || text === '未知') return '未知'
@@ -648,6 +664,46 @@ export class ApexImageRenderer {
       ctx.moveTo(0, MAP_CURRENT_HEIGHT)
       ctx.lineTo(MAP_WIDTH, MAP_CURRENT_HEIGHT)
       ctx.stroke()
+      await this.writePng(canvas, filePath)
+    })
+  }
+
+  async renderDailyMapSchedule(schedule: DailyMapScheduleInfo) {
+    if (!schedule.entries.length) throw new Error('缺少全天地图排期数据')
+    const key = `daily-map:${JSON.stringify(schedule)}`
+    return this.cached(key, 'map_cards', `daily_map_${schedule.mode}.png`, async (filePath) => {
+      const rowHeight = schedule.entries.length <= 8 ? 88 : 76
+      const rowGap = 10
+      const headerHeight = 154
+      const footerHeight = 72
+      const height = headerHeight + schedule.entries.length * (rowHeight + rowGap) + footerHeight + 18
+      const canvas = createCanvas(MAP_WIDTH, height)
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = 'rgb(7, 8, 11)'
+      ctx.fillRect(0, 0, MAP_WIDTH, height)
+
+      const hero = this.currentScheduleEntry(schedule.entries) || schedule.entries[0]
+      await this.drawMapBackground(ctx, scheduleEntryToRotation(hero), [0, 0, MAP_WIDTH, headerHeight], 0.42)
+      this.overlayRect(ctx, [0, 0, MAP_WIDTH, headerHeight], [0, 0, 0, 126])
+      this.drawHorizontalGradient(ctx, 0, headerHeight, 210)
+      drawTextWithShadow(ctx, 34, 62, schedule.title, fitFont(ctx, schedule.title, 42, 30, 600, true), true, [255, 255, 255, 255])
+      drawTextWithShadow(ctx, 36, 108, `${schedule.dateLabel}  北京时间`, 22, false, [226, 232, 240, 238])
+      fillRoundedRect(ctx, [690, 28, 852, 66], 8, [232, 43, 45, 235], [255, 118, 92, 180])
+      drawCenteredStrokedText(ctx, '排位全天', 20, true, 690, 852, 28, 66, [255, 255, 255, 255])
+      ctx.fillStyle = rgba([232, 43, 45, 230])
+      ctx.fillRect(34, 124, 226, 6)
+
+      let y = headerHeight + 14
+      for (let index = 0; index < schedule.entries.length; index += 1) {
+        await this.drawDailyMapRow(ctx, schedule.entries[index], index, 28, y, MAP_WIDTH - 56, rowHeight)
+        y += rowHeight + rowGap
+      }
+
+      const footerY = height - footerHeight
+      ctx.fillStyle = rgba([14, 16, 22, 236])
+      ctx.fillRect(0, footerY, MAP_WIDTH, footerHeight)
+      const note = `${schedule.sourceNote} · 生成 ${schedule.generatedAt} · /map 使用 API 实时数据`
+      drawTextWithShadow(ctx, 32, footerY + 42, note, fitFont(ctx, note, 17, 12, MAP_WIDTH - 64), false, [224, 232, 242, 238])
       await this.writePng(canvas, filePath)
     })
   }
@@ -1334,6 +1390,27 @@ export class ApexImageRenderer {
     gradient.addColorStop(1, '#404858')
     ctx.fillStyle = gradient
     ctx.fillRect(box[0], box[1], box[2] - box[0], box[3] - box[1])
+  }
+
+  private async drawDailyMapRow(ctx: any, entry: MapScheduleEntry, index: number, x: number, y: number, width: number, height: number) {
+    const box: Box = [x, y, x + width, y + height]
+    await this.drawMapBackground(ctx, scheduleEntryToRotation(entry), box, 0.48)
+    this.overlayRect(ctx, box, [0, 0, 0, 142])
+    fillRoundedRect(ctx, box, 8, [0, 0, 0, 0], [255, 255, 255, 42], 1)
+    const sourceLabel = entry.source === 'api' ? 'API' : entry.source === 'inferred' ? '推断' : '网页'
+    const badgeColor: Color = entry.source === 'api' ? [49, 191, 139, 235] : [232, 43, 45, 235]
+    fillRoundedRect(ctx, [x + 18, y + 18, x + 88, y + 46], 6, badgeColor)
+    drawCenteredStrokedText(ctx, sourceLabel, 17, true, x + 18, x + 88, y + 18, y + 46, [255, 255, 255, 255])
+    const timeText = `${entry.readableStart} - ${entry.readableEnd}`
+    drawTextWithShadow(ctx, x + 110, y + 32, timeText, 22, true, [226, 232, 240, 255])
+    const name = displayScheduleMapName(entry)
+    drawTextWithShadow(ctx, x + 300, y + 48, name, fitFont(ctx, name, 34, 24, 360, true), true, [255, 255, 255, 255])
+    drawTextWithShadow(ctx, x + width - 92, y + 48, `#${index + 1}`, 28, true, [235, 241, 248, 205])
+  }
+
+  private currentScheduleEntry(entries: MapScheduleEntry[]) {
+    const now = Date.now() / 1000
+    return entries.find((entry) => entry.start <= now && entry.end > now) || null
   }
 
   private overlayRect(ctx: any, box: Box, color: Color) {

@@ -18,6 +18,9 @@ export interface Config {
   whitelistEnabled?: boolean
   whitelistGroups?: StringList
   allowPrivate?: boolean
+  outputMode?: string
+  fontAutoDownload?: boolean
+  fontDownloadUrl?: string
   api_key?: string
   check_interval?: number
   max_retries?: number
@@ -30,13 +33,15 @@ export interface Config {
   whitelist_enabled?: boolean
   whitelist_groups?: StringList
   allow_private?: boolean
+  output_mode?: string
+  font_auto_download?: boolean
+  font_download_url?: string
   data_dir?: string
 }
 
 export interface ResolvedConfig {
   apiKey: string
   checkInterval: number
-  dataDir: string
   maxRetries: number
   timeoutMs: number
   minValidScore: number
@@ -48,6 +53,10 @@ export interface ResolvedConfig {
   whitelistEnabled: boolean
   whitelistGroups: string
   allowPrivate: boolean
+  outputMode: 'image' | 'text'
+  fontAutoDownload: boolean
+  fontDownloadUrl: string
+  dataDir: string
 }
 
 const listSchema = (description: string) => Schema.array(Schema.string()).role('table').default([]).description(
@@ -82,6 +91,9 @@ export const ConfigSchema = Schema.intersect([
 
   Schema.object({
     dataDir: Schema.string().default('./data/apexrankwatch').description('数据与图片缓存目录。旧版 groups.json 与 AstrBot 风格数据会在此目录下自动兼容。'),
+    outputMode: Schema.union(['image', 'text']).default('image').description('消息输出模式。image 为图片模式，text 为紧凑文字模式。'),
+    fontAutoDownload: Schema.boolean().default(true).description('缺少中文字体时是否自动下载字体缓存。'),
+    fontDownloadUrl: Schema.string().default('').description('自定义中文字体下载地址。留空时使用官方字体资源仓库。'),
   }).description('数据存储'),
 ]) as Schema<Config>
 
@@ -120,6 +132,7 @@ function pickBoolean(fallback: boolean, ...values: unknown[]) {
 }
 
 export function resolveConfig(config: Config = {}): ResolvedConfig {
+  const outputMode = pickString(config.outputMode, config.output_mode).toLowerCase()
   return {
     apiKey: pickString(config.apiKey, config.api_key),
     debugLogging: pickBoolean(false, config.debugLogging, config.debug_logging),
@@ -134,6 +147,9 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     whitelistEnabled: pickBoolean(false, config.whitelistEnabled, config.whitelist_enabled),
     whitelistGroups: pickStringList(config.whitelistGroups, config.whitelist_groups),
     allowPrivate: pickBoolean(true, config.allowPrivate, config.allow_private),
+    outputMode: outputMode === 'text' ? 'text' : 'image',
+    fontAutoDownload: pickBoolean(true, config.fontAutoDownload, config.font_auto_download),
+    fontDownloadUrl: pickString(config.fontDownloadUrl, config.font_download_url),
     dataDir: pickString(config.dataDir, config.data_dir) || './data/apexrankwatch',
   }
 }

@@ -43,6 +43,42 @@ export interface MapRotationInfo {
   battleRoyale: MapRotationMode
 }
 
+export interface MapScheduleEntry {
+  mapName: string
+  mapNameZh: string
+  start: number
+  end: number
+  readableStart: string
+  readableEnd: string
+  durationSecs: number
+  asset?: string
+  code?: string
+  source: 'api' | 'inferred' | 'web'
+}
+
+export interface DailyMapPoolState {
+  seasonKey: string
+  seasonEndIso: string
+  status: 'learning' | 'confirmed'
+  cycle: string[]
+  lastCurrent: string
+  lastNext: string
+  lastCurrentStart: number
+  updatedAt: number
+  reason: string
+}
+
+export interface DailyMapScheduleInfo {
+  mode: 'ranked' | 'battle_royale'
+  title: string
+  dateLabel: string
+  generatedAt: string
+  sourceUrl: string
+  sourceNote: string
+  entries: MapScheduleEntry[]
+  poolState: DailyMapPoolState | null
+}
+
 export interface PredatorPlatformInfo {
   platform: string
   requiredRp: number | null
@@ -199,6 +235,22 @@ export const SEASON_KEYWORD_COMMAND_BLOCKLIST = new Set([
   'apexban',
   '赛季关闭',
   '赛季开启',
+  'map',
+  '地图',
+  '排位地图',
+  'apexmap',
+  'apexrankmap',
+  '匹配地图',
+  '全天地图',
+  '全天排位地图',
+  '今日地图',
+  '今日排位地图',
+  'dailymap',
+  'apex_download',
+  'apexdownload',
+  'apexfont',
+  'apex字体',
+  'apex字体下载',
 ])
 
 function normalizeTranslationKey(value: unknown) {

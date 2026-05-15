@@ -1,9 +1,12 @@
 import {
   ApexPlayerStats,
+  DailyMapPoolState,
+  DailyMapScheduleInfo,
   LegendKillsRank,
   LoggerLike,
   MapRotationEntry,
   MapRotationInfo,
+  MapScheduleEntry,
   PLATFORM_SEARCH_ORDER,
   PredatorInfo,
   PredatorPlatformInfo,
@@ -20,6 +23,11 @@ import {
 export class PlayerNotFoundError extends Error {}
 
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>
+type DailyMapMode = 'ranked' | 'battle_royale'
+
+const SEASON_MAP_POOL_LOCK_BEFORE_END_SECS = 2 * 60 * 60
+const SEASON_MAP_POOL_LOCK_AFTER_END_SECS = 12 * 60 * 60
+const USER_AGENT = 'Koishi-ApexRankWatch/2.1.0'
 
 function withTimeout(timeoutMs: number) {
   const controller = new AbortController()
@@ -143,6 +151,32 @@ export class ApexApiClient {
     return parseMapRotationInfo(data)
   }
 
+  async fetchDailyMapSchedule(mode: DailyMapMode = 'ranked', poolState?: DailyMapPoolState | null, seasonInfo?: SeasonInfo | null): Promise<DailyMapScheduleInfo> {
+    const normalizedMode = normalizeDailyMapMode(mode)
+    const now = new Date()
+    const rotationInfo = await this.fetchMapRotationInfo()
+    const rotationMode = normalizedMode === 'battle_royale' ? rotationInfo.battleRoyale : rotationInfo.ranked
+    const updatedPoolState = normalizedMode === 'ranked' && poolState
+      ? updateDailyMapPoolState(poolState, rotationMode.current, rotationMode.next, seasonInfo || null, now)
+      : null
+    const [entries, sourceNote] = updatedPoolState
+      ? buildDailyMapEntriesFromPoolState(updatedPoolState, rotationMode.current, rotationMode.next)
+      : buildDailyMapEntriesFromPoolState(defaultDailyMapPoolState(), rotationMode.current, rotationMode.next)
+
+    return {
+      mode: normalizedMode,
+      title: normalizedMode === 'battle_royale' ? 'Apex 三人赛全天地图' : 'Apex 排位全天地图',
+      dateLabel: formatBeijingDay(now),
+      generatedAt: formatBeijingDateTime(now),
+      sourceUrl: normalizedMode === 'battle_royale'
+        ? 'https://apexlegendsstatus.com/current-map/battle_royale/pubs'
+        : 'https://apexlegendsstatus.com/current-map/battle_royale/ranked',
+      sourceNote,
+      entries,
+      poolState: updatedPoolState,
+    }
+  }
+
   async fetchSeasonInfo(seasonNumber?: number | null): Promise<SeasonInfo> {
     if (seasonNumber === undefined || seasonNumber === null) {
       const html = await this.requestText('https://apexlegendsstatus.com/new-season-countdown')
@@ -218,7 +252,7 @@ export class ApexApiClient {
       const timeout = withTimeout(this.options.timeoutMs)
       try {
         const headers: HeadersInit = {
-          'User-Agent': 'Koishi-ApexRankWatch/2.0.0',
+          'User-Agent': USER_AGENT,
           ...(extraHeaders || {}),
         }
         this.debugLogRequest('JSON', url, headers)
@@ -261,7 +295,7 @@ export class ApexApiClient {
       const timeout = withTimeout(this.options.timeoutMs)
       try {
         const headers: HeadersInit = {
-          'User-Agent': 'Koishi-ApexRankWatch/2.0.0',
+          'User-Agent': USER_AGENT,
         }
         this.debugLogRequest('TEXT', url, headers)
         const response = await this.fetcher(url, { method: 'GET', headers, signal: timeout.signal })
@@ -477,6 +511,369 @@ function parseMapRotationEntry(data: any): MapRotationEntry | null {
     mapNameZh: translate(mapName),
     remainingTimer: String(data.remainingTimer ?? data.remaining_timer ?? '').trim(),
   }
+}
+
+export function defaultDailyMapPoolState(): DailyMapPoolState {
+  return {
+    seasonKey: '',
+    seasonEndIso: '',
+    status: 'learning',
+    cycle: [],
+    lastCurrent: '',
+    lastNext: '',
+    lastCurrentStart: 0,
+    updatedAt: 0,
+    reason: '',
+  }
+}
+
+export function updateDailyMapPoolState(
+  state: DailyMapPoolState | null | undefined,
+  current: MapRotationEntry | null,
+  nextEntry: MapRotationEntry | null,
+  seasonInfo: SeasonInfo | null = null,
+  now = new Date(),
+): DailyMapPoolState {
+  const currentState = normalizeDailyMapPoolState(state)
+  const nowTs = Math.floor(now.getTime() / 1000)
+  const seasonKey = dailyMapSeasonKey(seasonInfo) || currentState.seasonKey
+  const seasonEndIso = seasonInfo?.endIso || currentState.seasonEndIso
+
+  if (!current || !nextEntry) {
+    return {
+      ...defaultDailyMapPoolState(),
+      seasonKey,
+      seasonEndIso,
+      status: 'learning',
+      cycle: [...currentState.cycle],
+      updatedAt: nowTs,
+      reason: 'API 未返回完整地图轮换，暂时无法确认排位地图池',
+    }
+  }
+
+  const currentName = String(current.mapName || '').trim()
+  const nextName = String(nextEntry.mapName || '').trim()
+  if (!currentName || !nextName) {
+    return {
+      ...defaultDailyMapPoolState(),
+      seasonKey,
+      seasonEndIso,
+      status: 'learning',
+      updatedAt: nowTs,
+      reason: 'API 地图名称缺失，暂时无法确认排位地图池',
+    }
+  }
+
+  if (isInSeasonMapPoolLockWindow(seasonInfo, now, seasonEndIso)) {
+    return newLearningMapPoolState(seasonKey, seasonEndIso, current, nextEntry, nowTs, '临近赛季更新，排位地图池重新确认中，仅显示 API 当前/下一张')
+  }
+
+  if (currentState.seasonKey && seasonKey && currentState.seasonKey !== seasonKey) {
+    return newLearningMapPoolState(seasonKey, seasonEndIso, current, nextEntry, nowTs, '赛季已变化，排位地图池重新学习中，仅显示 API 当前/下一张')
+  }
+
+  if (currentState.status === 'confirmed' && currentState.cycle.length >= 3) {
+    if (dailyMapPairMatchesCycle(currentState.cycle, currentName, nextName)) {
+      return {
+        seasonKey,
+        seasonEndIso,
+        status: 'confirmed',
+        cycle: [...currentState.cycle],
+        lastCurrent: currentName,
+        lastNext: nextName,
+        lastCurrentStart: current.start || 0,
+        updatedAt: nowTs,
+        reason: 'API 已确认排位地图池闭环',
+      }
+    }
+    return newLearningMapPoolState(seasonKey, seasonEndIso, current, nextEntry, nowTs, 'API 轮换显示地图池变化，重新学习中，仅显示 API 当前/下一张')
+  }
+
+  if (isSameApiPair(currentState, current, nextEntry)) {
+    return {
+      ...currentState,
+      seasonKey,
+      seasonEndIso,
+      updatedAt: nowTs,
+      reason: currentState.reason || '新赛季地图池学习中，仅显示 API 当前/下一张',
+    }
+  }
+
+  const cycle = advanceLearningMapCycle(currentState.cycle, currentName, nextName)
+  const status: DailyMapPoolState['status'] = learningCycleIsClosed(cycle, currentName, nextName) ? 'confirmed' : 'learning'
+  return {
+    seasonKey,
+    seasonEndIso,
+    status,
+    cycle,
+    lastCurrent: currentName,
+    lastNext: nextName,
+    lastCurrentStart: current.start || 0,
+    updatedAt: nowTs,
+    reason: status === 'confirmed' ? 'API 已确认排位地图池闭环' : '新赛季地图池学习中，仅显示 API 当前/下一张',
+  }
+}
+
+export function buildDailyMapEntriesFromPoolState(
+  state: DailyMapPoolState | null | undefined,
+  current: MapRotationEntry | null,
+  nextEntry: MapRotationEntry | null,
+  hours = 24,
+): [MapScheduleEntry[], string] {
+  const poolState = normalizeDailyMapPoolState(state)
+  const anchors = dedupeScheduleEntries([scheduleEntryFromRotationEntry(current), scheduleEntryFromRotationEntry(nextEntry)].filter(Boolean) as MapScheduleEntry[])
+
+  if (poolState.status === 'confirmed' && poolState.cycle.length >= 3 && current && nextEntry) {
+    const entries = buildRollingMapEntriesFromCycle(poolState.cycle, current, nextEntry, hours)
+    if (entries.length) {
+      return [entries, 'API 已确认排位地图池闭环，当前/下一张为 API，后续按已确认地图池推断']
+    }
+    return [anchors, 'API 轮换与已确认地图池不一致，仅显示 API 当前/下一张']
+  }
+
+  if (
+    poolState.status === 'learning'
+    && poolState.cycle.length >= 2
+    && current
+    && nextEntry
+    && learningMapPoolAllowsTentativeForecast(poolState)
+  ) {
+    const entries = buildTentativeMapEntriesFromCycle(poolState.cycle, current, nextEntry, hours)
+    if (entries.length > anchors.length) {
+      return [entries, '地图池仍在学习中，当前/下一张为 API，后续按已观测顺序临时推测，可能随 API 下一次校正']
+    }
+  }
+
+  let note = poolState.reason || '新赛季地图池学习中，仅显示 API 当前/下一张'
+  if (!note.includes('仅显示 API 当前/下一张')) note = `${note}，仅显示 API 当前/下一张`
+  return [anchors, note]
+}
+
+export function normalizeDailyMapPoolState(value: DailyMapPoolState | any): DailyMapPoolState {
+  if (!value || typeof value !== 'object') return defaultDailyMapPoolState()
+  const rawCycle = Array.isArray(value.cycle) ? value.cycle : []
+  const status = String(value.status || 'learning').toLowerCase() === 'confirmed' ? 'confirmed' : 'learning'
+  return {
+    seasonKey: String(value.seasonKey ?? value.season_key ?? ''),
+    seasonEndIso: String(value.seasonEndIso ?? value.season_end_iso ?? ''),
+    status,
+    cycle: dedupeMapCycle(rawCycle.map((item: unknown) => String(item || '').trim()).filter(Boolean)),
+    lastCurrent: String(value.lastCurrent ?? value.last_current ?? ''),
+    lastNext: String(value.lastNext ?? value.last_next ?? ''),
+    lastCurrentStart: toInt(value.lastCurrentStart ?? value.last_current_start) ?? 0,
+    updatedAt: toInt(value.updatedAt ?? value.updated_at) ?? 0,
+    reason: String(value.reason ?? ''),
+  }
+}
+
+function normalizeDailyMapMode(mode: string): DailyMapMode {
+  return mode === 'battle_royale' ? 'battle_royale' : 'ranked'
+}
+
+function newLearningMapPoolState(
+  seasonKey: string,
+  seasonEndIso: string,
+  current: MapRotationEntry,
+  nextEntry: MapRotationEntry,
+  updatedAt: number,
+  reason: string,
+): DailyMapPoolState {
+  return {
+    seasonKey,
+    seasonEndIso,
+    status: 'learning',
+    cycle: dedupeMapCycle([current.mapName, nextEntry.mapName]),
+    lastCurrent: String(current.mapName || ''),
+    lastNext: String(nextEntry.mapName || ''),
+    lastCurrentStart: current.start || 0,
+    updatedAt,
+    reason,
+  }
+}
+
+function buildRollingMapEntriesFromCycle(cycle: string[], current: MapRotationEntry, nextEntry: MapRotationEntry, hours: number) {
+  const normalizedCycle = dedupeMapCycle(cycle)
+  if (normalizedCycle.length < 3) return []
+  if (!dailyMapPairMatchesCycle(normalizedCycle, current.mapName, nextEntry.mapName)) return []
+  return buildCycleEntries(normalizedCycle, current, nextEntry, hours)
+}
+
+function buildTentativeMapEntriesFromCycle(cycle: string[], current: MapRotationEntry, nextEntry: MapRotationEntry, hours: number) {
+  const normalizedCycle = dedupeMapCycle(cycle)
+  if (normalizedCycle.length < 2) return []
+  if (!dailyMapPairMatchesCycle(normalizedCycle, current.mapName, nextEntry.mapName)) return []
+  return buildCycleEntries(normalizedCycle, current, nextEntry, hours)
+}
+
+function buildCycleEntries(cycle: string[], current: MapRotationEntry, nextEntry: MapRotationEntry, hours: number) {
+  const duration = rotationDurationSeconds(current) || rotationDurationSeconds(nextEntry)
+  if (duration <= 0 || !current.start) return []
+  const currentIndex = mapIndexInCycle(cycle, current.mapName)
+  if (currentIndex < 0) return []
+  const entries: MapScheduleEntry[] = []
+  const windowEnd = current.start + Math.max(1, Math.trunc(hours)) * 60 * 60
+  let start = current.start
+  let index = currentIndex
+  while (start < windowEnd) {
+    const mapName = cycle[index % cycle.length]
+    let end = start + duration
+    let source: MapScheduleEntry['source'] = 'inferred'
+    if (sameMapName(mapName, current.mapName) && Math.abs(start - (current.start || 0)) <= 60) {
+      end = current.end || end
+      source = 'api'
+    } else if (sameMapName(mapName, nextEntry.mapName) && Math.abs(start - (nextEntry.start || 0)) <= 60) {
+      end = nextEntry.end || end
+      source = 'api'
+    }
+    entries.push(makeMapScheduleEntry(mapName, start, end, source))
+    start = end
+    index += 1
+  }
+  return dedupeScheduleEntries(entries)
+}
+
+function scheduleEntryFromRotationEntry(entry: MapRotationEntry | null): MapScheduleEntry | null {
+  if (!entry?.mapName || !entry.start || !entry.end) return null
+  return makeMapScheduleEntry(entry.mapName, entry.start, entry.end, 'api', entry.mapNameZh)
+}
+
+function makeMapScheduleEntry(mapName: string, start: number, end: number, source: MapScheduleEntry['source'], mapNameZh = translate(mapName)): MapScheduleEntry {
+  return {
+    mapName,
+    mapNameZh,
+    start,
+    end,
+    readableStart: formatBeijingTime(start),
+    readableEnd: formatBeijingTime(end),
+    durationSecs: Math.max(0, end - start),
+    source,
+  }
+}
+
+function dedupeScheduleEntries(entries: MapScheduleEntry[]) {
+  const seen = new Set<string>()
+  const result: MapScheduleEntry[] = []
+  for (const entry of entries) {
+    const key = `${normalizeMapNameForCompare(entry.mapName)}:${entry.start}:${entry.end}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(entry)
+  }
+  return result.sort((a, b) => a.start - b.start)
+}
+
+function dedupeMapCycle(cycle: string[]) {
+  const result: string[] = []
+  for (const item of cycle) {
+    const name = String(item || '').trim()
+    if (!name || result.some((existing) => sameMapName(existing, name))) continue
+    result.push(name)
+  }
+  return result
+}
+
+function sameMapName(left: string, right: string) {
+  return normalizeMapNameForCompare(left) === normalizeMapNameForCompare(right)
+}
+
+function normalizeMapNameForCompare(value: string) {
+  return String(value || '').trim().toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, '')
+}
+
+function mapIndexInCycle(cycle: string[], mapName: string) {
+  return cycle.findIndex((item) => sameMapName(item, mapName))
+}
+
+function dailyMapPairMatchesCycle(cycle: string[], currentName: string, nextName: string) {
+  const index = mapIndexInCycle(cycle, currentName)
+  if (index < 0 || !cycle.length) return false
+  return sameMapName(cycle[(index + 1) % cycle.length], nextName)
+}
+
+function advanceLearningMapCycle(cycle: string[], currentName: string, nextName: string) {
+  const currentCycle = dedupeMapCycle(cycle)
+  if (currentCycle.length < 2) return dedupeMapCycle([currentName, nextName])
+  if (sameMapName(currentCycle[currentCycle.length - 1], currentName)) {
+    if (sameMapName(currentCycle[0], nextName) && currentCycle.length >= 3) return currentCycle
+    if (!currentCycle.some((item) => sameMapName(item, nextName))) return [...currentCycle, nextName]
+    return dedupeMapCycle([currentName, nextName])
+  }
+  if (dailyMapPairMatchesCycle(currentCycle, currentName, nextName)) return currentCycle
+  if (currentCycle.length >= 2 && sameMapName(currentCycle[0], nextName) && !currentCycle.some((item) => sameMapName(item, currentName))) {
+    return [...currentCycle, currentName]
+  }
+  return dedupeMapCycle([currentName, nextName])
+}
+
+function learningCycleIsClosed(cycle: string[], currentName: string, nextName: string) {
+  return cycle.length >= 3 && sameMapName(cycle[cycle.length - 1], currentName) && sameMapName(cycle[0], nextName)
+}
+
+function isSameApiPair(state: DailyMapPoolState, current: MapRotationEntry, nextEntry: MapRotationEntry) {
+  return !!state.lastCurrentStart
+    && state.lastCurrentStart === (current.start || 0)
+    && sameMapName(state.lastCurrent, current.mapName)
+    && sameMapName(state.lastNext, nextEntry.mapName)
+}
+
+function learningMapPoolAllowsTentativeForecast(poolState: DailyMapPoolState) {
+  return !['临近赛季更新', '赛季已变化', '地图池变化', '未返回完整', '名称缺失'].some((token) => poolState.reason.includes(token))
+}
+
+function rotationDurationSeconds(entry: MapRotationEntry | null) {
+  if (!entry?.start || !entry.end) return 0
+  return Math.max(0, entry.end - entry.start)
+}
+
+function dailyMapSeasonKey(seasonInfo: SeasonInfo | null) {
+  if (!seasonInfo) return ''
+  if (seasonInfo.seasonNumber !== null && seasonInfo.seasonNumber !== undefined) return `S${seasonInfo.seasonNumber}:${seasonInfo.seasonName || ''}`
+  if (seasonInfo.startIso || seasonInfo.endIso) return `${seasonInfo.startIso}:${seasonInfo.endIso}`
+  return ''
+}
+
+function isInSeasonMapPoolLockWindow(seasonInfo: SeasonInfo | null, now: Date, fallbackEndIso: string) {
+  const endIso = seasonInfo?.endIso || fallbackEndIso
+  if (!endIso) return false
+  const end = Date.parse(endIso)
+  if (!Number.isFinite(end)) return false
+  const current = now.getTime()
+  return current >= end - SEASON_MAP_POOL_LOCK_BEFORE_END_SECS * 1000 && current <= end + SEASON_MAP_POOL_LOCK_AFTER_END_SECS * 1000
+}
+
+function formatBeijingTime(seconds: number) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(seconds * 1000))
+}
+
+function formatBeijingDay(date: Date) {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || ''
+  return `${get('year')}-${get('month')}-${get('day')}`
+}
+
+function formatBeijingDateTime(date: Date) {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date)
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || ''
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`
 }
 
 function getFirstInt(data: any, ...candidates: string[]) {

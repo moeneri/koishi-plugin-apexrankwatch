@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-apexrankwatch",
-  "description": "用于查询 Apex 玩家段位、地图轮换、赛季时间、猎杀线，并支持群内持续监控与图片化通知的 Koishi 插件",
-  "version": "2.0.1",
+  "description": "支持查询 Apex 玩家段位、地图轮换、全天地图、赛季时间，并持续监控玩家段位变化通知的 Koishi 插件",
+  "version": "2.1.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -43,7 +43,7 @@
   },
   "koishi": {
     "description": {
-      "zh": "查询 Apex 玩家段位、地图轮换、赛季时间、猎杀线，并支持群内持续监控与图片化通知。",
+      "zh": "查询 Apex 玩家段位、地图轮换、全天地图、赛季时间，持续监控玩家段位变化并通知。",
       "en": "Query Apex Legends ranks, map rotations, seasons, predator thresholds, and watch rank changes with image notifications."
     }
   },

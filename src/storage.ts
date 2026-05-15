@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import {
+  DailyMapPoolState,
   NotificationTarget,
   RuntimeSettings,
   StoredGroupRecord,
@@ -87,6 +88,49 @@ function normalizeGroupRecord(groupId: string, value: any): StoredGroupRecord | 
     groupId: normalizedGroupId,
     target,
     players,
+  }
+}
+
+function defaultDailyMapPoolState(): DailyMapPoolState {
+  return {
+    seasonKey: '',
+    seasonEndIso: '',
+    status: 'learning',
+    cycle: [],
+    lastCurrent: '',
+    lastNext: '',
+    lastCurrentStart: 0,
+    updatedAt: 0,
+    reason: '',
+  }
+}
+
+function normalizeMapCycle(cycle: unknown) {
+  const result: string[] = []
+  if (!Array.isArray(cycle)) return result
+  for (const item of cycle) {
+    const text = String(item || '').trim()
+    if (!text) continue
+    const key = text.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, '')
+    if (result.some((existing) => existing.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, '') === key)) continue
+    result.push(text)
+  }
+  return result
+}
+
+function normalizeDailyMapPoolState(value: any): DailyMapPoolState {
+  if (!value || typeof value !== 'object') return defaultDailyMapPoolState()
+  const status = String(value.status || 'learning').toLowerCase() === 'confirmed' ? 'confirmed' : 'learning'
+  return {
+    seasonKey: String(value.seasonKey ?? value.season_key ?? ''),
+    seasonEndIso: String(value.seasonEndIso ?? value.season_end_iso ?? ''),
+    status,
+    cycle: normalizeMapCycle(value.cycle),
+    lastCurrent: String(value.lastCurrent ?? value.last_current ?? ''),
+    lastNext: String(value.lastNext ?? value.last_next ?? ''),
+    lastCurrentStart: toInt(value.lastCurrentStart ?? value.last_current_start) ?? 0,
+    updatedAt: toInt(value.updatedAt ?? value.updated_at) ?? 0,
+    reason: String(value.reason ?? ''),
   }
 }
 
@@ -203,6 +247,37 @@ export class SettingsStore {
     await writeJsonAtomic(this.filePath, {
       runtime_blacklist: Array.from(new Set(settings.runtimeBlacklist)).sort(),
       season_keyword_disabled_groups: Array.from(new Set(settings.seasonKeywordDisabledGroups)).sort(),
+    })
+  }
+}
+
+export class DailyMapPoolStore {
+  constructor(private readonly filePath: string, private readonly logger: LoggerLike) {}
+
+  async load(): Promise<DailyMapPoolState> {
+    try {
+      const raw = JSON.parse(await readFile(this.filePath, 'utf8'))
+      return normalizeDailyMapPoolState(raw)
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') {
+        this.logger.error(`加载 daily_map_pool_state.json 失败: ${error?.message || error}`)
+      }
+      return defaultDailyMapPoolState()
+    }
+  }
+
+  async save(state: DailyMapPoolState) {
+    const normalized = normalizeDailyMapPoolState(state)
+    await writeJsonAtomic(this.filePath, {
+      season_key: normalized.seasonKey,
+      season_end_iso: normalized.seasonEndIso,
+      status: normalized.status,
+      cycle: normalized.cycle,
+      last_current: normalized.lastCurrent,
+      last_next: normalized.lastNext,
+      last_current_start: normalized.lastCurrentStart,
+      updated_at: normalized.updatedAt,
+      reason: normalized.reason,
     })
   }
 }
