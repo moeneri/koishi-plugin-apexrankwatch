@@ -4,6 +4,10 @@ import { Bot, Context, Logger, Session, h, type Fragment } from 'koishi'
 import { ApexApiClient, PlayerNotFoundError } from './api'
 import { ResolvedConfig } from './config'
 import { ApexImageRenderer } from './image'
+import { buildHelpCardDocument } from './html-cards/help'
+import { buildPredatorCardDocument } from './html-cards/predator'
+import { buildSeasonCardDocument } from './html-cards/season'
+import { renderHtmlCardToBuffer } from './html-cards/shared-renderer'
 import { renderLeaderboardOutput } from './leaderboard/render'
 import { getLeaderboardResourceLayout } from './leaderboard/resource-reloader'
 import type { LeaderboardRenderRequest } from './leaderboard/types'
@@ -15,6 +19,7 @@ import {
   NotificationTarget,
   RuntimeSettings,
   ScoreHistoryEntry,
+  SeasonInfo,
   SEASON_KEYWORD_COMMAND_BLOCKLIST,
   StoredGroupRecord,
   StoredPlayerRecord,
@@ -119,6 +124,66 @@ export class ApexRankWatchRuntime {
       this.logger.error(`${errorLabel}: ${String((error as Error)?.message || error)}`)
       return null
     }
+  }
+
+  private async tryRenderHtmlCardMessage(
+    render: () => Promise<Buffer>,
+    errorLabel: string,
+    suffix = '',
+  ): Promise<Fragment | null> {
+    try {
+      const imageBuffer = await render()
+      const message = h.image(imageBuffer, 'image/png')
+      return suffix ? `${message}${suffix}` : message
+    } catch (error) {
+      this.logger.error(`${errorLabel}: ${String((error as Error)?.message || error)}`)
+      return null
+    }
+  }
+
+  // Season entry matrix frozen for this migration:
+  // 1. /apexseason [season:string]
+  // 2. season keyword auto-reply middleware
+  private async renderSeasonResult(seasonInfo: SeasonInfo, suffix = '', errorLabelPrefix = 'season'): Promise<Fragment | string> {
+    const htmlMessage = await this.tryRenderHtmlCardMessage(
+      () => renderHtmlCardToBuffer({
+        document: buildSeasonCardDocument(seasonInfo),
+        context: {
+          logger: this.logger,
+          runtimeConfig: {
+            resourceDir: this.config.leaderboardResourceDir,
+            viewportWidth: this.config.leaderboardViewportWidth,
+            deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+            waitUntil: this.config.leaderboardWaitUntil,
+            titleFont: this.config.leaderboardTitleFont,
+            bodyFont: this.config.leaderboardBodyFont,
+            numberFont: this.config.leaderboardNumberFont,
+            fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+            themePreset: this.config.leaderboardThemePreset,
+            backgroundType: this.config.leaderboardBackgroundType,
+            backgroundValue: this.config.leaderboardBackgroundValue,
+            backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+            customCss: this.config.leaderboardCustomCss,
+          },
+          resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+          puppeteer: {
+            browser: (this.ctx as any).puppeteer?.browser,
+          },
+        },
+      }),
+      `${errorLabelPrefix} html render failed`,
+      suffix,
+    )
+    if (htmlMessage) return htmlMessage
+
+    const imageMessage = await this.tryRenderImageMessage(
+      () => this.imageRenderer.renderSeasonInfo(seasonInfo),
+      `${errorLabelPrefix} image render failed`,
+      suffix,
+    )
+    if (imageMessage) return imageMessage
+
+    return `${this.formatSeasonInfo(seasonInfo)}${suffix}`
   }
 
   private waitForKoishiReady() {
@@ -272,13 +337,7 @@ export class ApexRankWatchRuntime {
       try {
         const seasonInfo = await this.api.fetchSeasonInfo()
         const suffix = groupId ? '\n\ud83d\udd15 \u5173\u95ed\u8d5b\u5b63\u5173\u952e\u8bcd\u56de\u590d\uff1a/\u8d5b\u5b63\u5173\u95ed' : ''
-        const imageMessage = await this.tryRenderImageMessage(
-          () => this.imageRenderer.renderSeasonInfo(seasonInfo),
-          'season keyword image render failed',
-          suffix,
-        )
-        if (imageMessage) return imageMessage
-        return `${this.formatSeasonInfo(seasonInfo)}${suffix}`
+        return this.renderSeasonResult(seasonInfo, suffix, 'season keyword')
       } catch (error: any) {
         this.logger.error(`season query failed: ${error?.message || error}`)
       }
@@ -890,6 +949,36 @@ export class ApexRankWatchRuntime {
     const deny = this.guardAccess(session)
     if (deny) return [this.timeLine(), deny].join('\n')
 
+    const htmlMessage = await this.tryRenderHtmlCardMessage(
+      () => renderHtmlCardToBuffer({
+        document: buildHelpCardDocument(this.imageRenderOptions()),
+        context: {
+          logger: this.logger,
+          runtimeConfig: {
+            resourceDir: this.config.leaderboardResourceDir,
+            viewportWidth: this.config.leaderboardViewportWidth,
+            deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+            waitUntil: this.config.leaderboardWaitUntil,
+            titleFont: this.config.leaderboardTitleFont,
+            bodyFont: this.config.leaderboardBodyFont,
+            numberFont: this.config.leaderboardNumberFont,
+            fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+            themePreset: this.config.leaderboardThemePreset,
+            backgroundType: this.config.leaderboardBackgroundType,
+            backgroundValue: this.config.leaderboardBackgroundValue,
+            backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+            customCss: this.config.leaderboardCustomCss,
+          },
+          resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+          puppeteer: {
+            browser: (this.ctx as any).puppeteer?.browser,
+          },
+        },
+      }),
+      'help html render failed',
+    )
+    if (htmlMessage) return htmlMessage
+
     const imageMessage = await this.tryRenderImageMessage(
       () => this.imageRenderer.renderHelp(this.imageRenderOptions()),
       'help image render failed',
@@ -990,6 +1079,37 @@ export class ApexRankWatchRuntime {
       if (!predatorInfo.platforms.length) {
         return [this.timeLine(), '\u26a0\ufe0f \u6682\u672a\u83b7\u53d6\u5230\u730e\u6740\u95e8\u69db\u6570\u636e\u3002'].join('\n')
       }
+
+      const htmlMessage = await this.tryRenderHtmlCardMessage(
+        () => renderHtmlCardToBuffer({
+          document: buildPredatorCardDocument(predatorInfo, selectedPlatform),
+          context: {
+            logger: this.logger,
+            runtimeConfig: {
+              resourceDir: this.config.leaderboardResourceDir,
+              viewportWidth: this.config.leaderboardViewportWidth,
+              deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+              waitUntil: this.config.leaderboardWaitUntil,
+              titleFont: this.config.leaderboardTitleFont,
+              bodyFont: this.config.leaderboardBodyFont,
+              numberFont: this.config.leaderboardNumberFont,
+              fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+              themePreset: this.config.leaderboardThemePreset,
+              backgroundType: this.config.leaderboardBackgroundType,
+              backgroundValue: this.config.leaderboardBackgroundValue,
+              backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+              customCss: this.config.leaderboardCustomCss,
+            },
+            resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+            puppeteer: {
+              browser: (this.ctx as any).puppeteer?.browser,
+            },
+          },
+        }),
+        'predator html render failed',
+      )
+      if (htmlMessage) return htmlMessage
+
       const imageMessage = await this.tryRenderImageMessage(
         () => this.imageRenderer.renderPredatorInfo(predatorInfo),
         'predator image render failed',
@@ -1016,12 +1136,7 @@ export class ApexRankWatchRuntime {
 
     try {
       const seasonInfo = await this.api.fetchSeasonInfo(seasonNumber)
-      const imageMessage = await this.tryRenderImageMessage(
-        () => this.imageRenderer.renderSeasonInfo(seasonInfo),
-        'season image render failed',
-      )
-      if (imageMessage) return imageMessage
-      return this.formatSeasonInfo(seasonInfo)
+      return this.renderSeasonResult(seasonInfo)
     } catch (error) {
       this.logger.error(`season query failed: ${String((error as Error)?.message || error)}`)
       return [this.timeLine(), '\u274c \u67e5\u8be2\u5931\u8d25\uff1a\u65e0\u6cd5\u83b7\u53d6\u8d5b\u5b63\u65f6\u95f4\u4fe1\u606f\u3002'].join('\n')
