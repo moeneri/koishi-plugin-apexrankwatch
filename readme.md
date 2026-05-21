@@ -48,7 +48,8 @@ yarn add koishi-plugin-apexrankwatch
 
 ## 功能亮点
 
-- **图片化输出**：玩家档案、分数变化、监控添加、监控列表、地图轮换等仍优先输出 PNG 图片；上分榜、掉分榜以及第一批信息卡（`/apexhelp`、`/apexpredator`、`/apexseason`、赛季关键词自动回复）会优先使用 HTML/CSS + Puppeteer 渲染，失败时自动回退到旧图片或文本。
+- **图片化输出**：榜单、帮助卡、赛季卡、猎杀线卡、监控列表卡、玩家档案卡与分数变化通知卡均优先使用 HTML/CSS + Puppeteer 渲染，并统一保留 legacy 图片与文本回退；监控添加、地图轮换等其余卡片仍优先输出 PNG 图片。
+- **中文字体保障**：在 Linux / Docker 等缺少中文字体的环境中，可自动下载字体缓存，提升 legacy canvas 图片链的中文显示稳定性。
 - **账号绑定**：支持按用户全局绑定 Apex 玩家名或 UID，并通过 `/apex查分` 一键查询绑定账号。
 - **玩家查询**：展示段位、RP、等级、UID、在线状态、当前英雄、英雄击杀排名与全球排名百分比。
 - **群内监控**：按群保存监控玩家，定时检测排位分变化并推送通知。
@@ -61,7 +62,7 @@ yarn add koishi-plugin-apexrankwatch
 - **权限与黑名单**：支持用户黑名单、玩家黑名单、运行时黑名单、群白名单、主人账号和私聊开关。
 - **数据兼容**：兼容旧 Koishi 数据结构、AstrBot 风格数据、snake_case 配置与逗号分隔名单。
 
-图片生成失败时会自动回退为文字输出，不会影响基础查询。当前 HTML 主链重点覆盖榜单与第一批信息卡（`/apexhelp`、`/apexpredator`、`/apexseason`、赛季关键词自动回复），并非所有图片卡都已迁移。
+图片生成失败时会自动回退为文字输出，不会影响基础查询。当前 HTML 主链已覆盖榜单、帮助卡（`/apexhelp`）、赛季卡（`/apexseason` 与赛季关键词自动回复）、猎杀线卡（`/apexpredator`）、监控列表卡（`/apexranklist`）、玩家档案卡（`/apexrank`、`/apex查分`）以及分数变化通知卡，并非所有图片卡都已迁移。
 
 ## 命令
 
@@ -70,8 +71,8 @@ yarn add koishi-plugin-apexrankwatch
 | 命令 | 说明 |
 | --- | --- |
 | `/apexhelp` | 查看帮助卡。优先输出 HTML 帮助卡，失败时回退旧图片或文本。 |
-| `/apexrank <玩家名\|uid:...> [平台]` | 查询玩家段位信息。未指定平台时会按 PC、PlayStation、Xbox、Switch 自动尝试。 |
-| `/apex查分 [玩家名\|uid:...]` | 不带参数时查询当前用户的绑定账号；带参数时按显式输入临时查询。 |
+| `/apexrank <玩家名\|uid:...> [平台]` | 查询玩家段位信息。未指定平台时会按 PC、PlayStation、Xbox、Switch 自动尝试；优先输出 HTML 玩家档案卡，失败时回退旧图片或文本。 |
+| `/apex查分 [玩家名\|uid:...]` | 不带参数时查询当前用户的绑定账号；带参数时按显式输入临时查询。优先输出 HTML 玩家档案卡，失败时回退旧图片或文本。 |
 | `/map` | 查询排位地图轮换。 |
 | `/匹配地图` | 查询三人赛匹配地图轮换。 |
 | `/apexseason [赛季号\|current]` | 查询当前或指定赛季信息。优先输出 HTML 卡片，失败时回退旧图片或文本。 |
@@ -91,7 +92,7 @@ yarn add koishi-plugin-apexrankwatch
 | 命令 | 说明 |
 | --- | --- |
 | `/apexrankwatch <玩家名\|uid:...> [平台]` | 将玩家加入当前群排位监控。 |
-| `/apexranklist` | 查看当前群监控列表。若已有备注，会优先显示备注名。 |
+| `/apexranklist` | 查看当前群监控列表。若已有备注，会优先显示备注名；优先输出 HTML 监控列表卡，失败时回退旧图片或文本。 |
 | `/apexremark <玩家名\|uid:...> [平台] [备注]` | 设置或清除监控玩家备注。备注最长 32 字符，会清理换行、控制字符和多余空格。 |
 | `/apexrankremove <玩家名\|uid:...> [平台]` | 从当前群移除玩家监控。 |
 
@@ -109,6 +110,7 @@ yarn add koishi-plugin-apexrankwatch
 | 命令 | 说明 |
 | --- | --- |
 | `/apextest` | 测试插件状态和主动消息能力。 |
+| `/apex_download` | 检查当前中文字体状态；若缺失则尝试下载并写入本地字体缓存。 |
 | `/apexblacklist <add\|remove\|list\|clear> <玩家ID>` | 管理运行时玩家黑名单。 |
 | `/赛季关闭` | 关闭当前群“赛季”关键词自动回复。 |
 | `/赛季开启` | 开启当前群“赛季”关键词自动回复。 |
@@ -125,6 +127,7 @@ yarn add koishi-plugin-apexrankwatch
 - 猎杀线：`/apex猎杀`、`/猎杀`
 - 黑名单：`/apex黑名单`、`/不准视奸`、`/apexban`
 - 帮助：`/apex帮助`、`/apexrankhelp`
+- 字体下载：`/apexdownload`、`/apexfont`、`/apex字体`、`/apex字体下载`
 
 ## 参数说明
 
@@ -175,6 +178,8 @@ Koishi 控制台会按分组展示配置项。推荐使用 camelCase 字段；�
 | `blacklist` | 空列表 | 全局玩家黑名单，禁止查询和监控这些玩家 ID / UID。 |
 | `queryBlocklist` | 空列表 | 查询黑名单，禁止查询和监控这些玩家 ID / UID。 |
 | `dataDir` | `./data/apexrankwatch` | 数据与图片缓存目录。旧版 `groups.json` 与 AstrBot 风格数据会自动兼容。 |
+| `fontAutoDownload` | `true` | 缺少中文字体时是否自动下载字体缓存。 |
+| `fontDownloadUrl` | 空 | 自定义中文字体下载地址；留空时使用官方字体资源仓库。 |
 | `leaderboardRenderMode` | `html` | 榜单输出模式，可选 `html`、`legacy`、`text`。 |
 | `leaderboardEnableLegacyImageFallback` | `true` | HTML 榜单渲染失败后是否回退到旧榜单图片实现。 |
 | `leaderboardEnableTextFallback` | `true` | 图像渲染失败后是否继续回退为文本榜单。 |
@@ -236,7 +241,7 @@ Koishi 控制台会按分组展示配置项。推荐使用 camelCase 字段；�
 - 赛季时间与榜单统计范围会统一按**北京时间**展示与计算。
 - 监控通知依赖 Koishi 适配器的主动消息能力；如果当前平台不支持主动消息，查询命令仍可正常使用。
 - 插件使用 `@napi-rs/canvas` 生成图片，并随 npm 包发布 `assets/` 素材目录。如果部署环境缺少对应平台的 canvas 原生包，请先确认 Node.js 版本和系统架构。
-- 图片中文显示会优先尝试常见 CJK 字体；若目标系统完全缺少可用中文字体，仍可能影响极端场景下的显示效果。
+- 图片中文显示会优先尝试常见 CJK 字体；若目标系统完全缺少可用中文字体，可执行 `/apex_download` 尝试下载字体缓存；若环境无法访问 GitHub，可改为配置 `fontDownloadUrl` 使用自定义镜像地址。
 - HTML 榜单与第一批 HTML 信息卡（`/apexhelp`、`/apexpredator`、`/apexseason`、赛季关键词自动回复）会从 `leaderboardResourceDir` 下读取字体与本地背景资源，并通过本地 `file://` 基准路径解析 `fonts/` 与 `backgrounds/` 相对资源。
 - HTML 榜单当前采用水平柱状图样式展示净变化，默认优先使用“添加该监控项的 QQ 用户头像”，并对头像抓取结果做成功 / 失败分级缓存；若旧历史数据未直接记录监控创建者 QQ 号，则会继续尝试从当前群监控记录或绑定信息中回查，仍无法确定时才回退为占位头像。
 - `leaderboardBackgroundType = api` 时，插件会向 `leaderboardBackgroundValue` 指定地址发起真实 HTTP GET 请求；目前支持以下响应形式：CSS 文本、图片 URL、base64 图片、图片二进制、以及常见 JSON 包装字段（如 `css`、`url`、`imageUrl`、`base64`、`data.*`）。
@@ -255,6 +260,12 @@ Koishi 控制台会按分组展示配置项。推荐使用 camelCase 字段；�
 ## 链接
 
 - GitHub：[moeneri/koishi-plugin-apexrankwatch](https://github.com/moeneri/koishi-plugin-apexrankwatch)
+- npm：[koishi-plugin-apexrankwatch](https://www.npmjs.com/package/koishi-plugin-apexrankwatch)
+
+## 许可证
+
+MIT
+gin-apexrankwatch](https://github.com/moeneri/koishi-plugin-apexrankwatch)
 - npm：[koishi-plugin-apexrankwatch](https://www.npmjs.com/package/koishi-plugin-apexrankwatch)
 
 ## 许可证

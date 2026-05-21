@@ -3,11 +3,15 @@ import { resolve } from 'node:path'
 import { Bot, Context, Logger, Session, h, type Fragment } from 'koishi'
 import { ApexApiClient, PlayerNotFoundError } from './api'
 import { ResolvedConfig } from './config'
+import { FontManager } from './font'
 import { ApexImageRenderer } from './image'
 import { buildHelpCardDocument } from './html-cards/help'
+import { buildPlayerRankCardDocument } from './html-cards/player-rank'
 import { buildPredatorCardDocument } from './html-cards/predator'
+import { buildRankChangeCardDocument } from './html-cards/rank-change'
 import { buildSeasonCardDocument } from './html-cards/season'
-import { renderHtmlCardToBuffer } from './html-cards/shared-renderer'
+import { buildWatchListCardDocument } from './html-cards/watch-list'
+import { renderHtmlCardToBuffer, renderPanelCardToBuffer } from './html-cards/shared-renderer'
 import { renderLeaderboardOutput } from './leaderboard/render'
 import { getLeaderboardResourceLayout } from './leaderboard/resource-reloader'
 import type { LeaderboardRenderRequest } from './leaderboard/types'
@@ -41,6 +45,7 @@ import {
   sanitizeRemark,
   splitCsv,
   summarizeLeaderboard,
+  translateState,
 } from './shared'
 
 type CommandSession = Session
@@ -57,6 +62,7 @@ export class ApexRankWatchRuntime {
   private readonly bindingStore: BindingStore
   private readonly scoreHistoryStore: ScoreHistoryStore
   private readonly imageRenderer: ApexImageRenderer
+  private readonly fontManager: FontManager
   private readonly api: ApexApiClient
   private readonly configBlacklist: Set<string>
   private readonly queryBlocklist: Set<string>
@@ -83,6 +89,12 @@ export class ApexRankWatchRuntime {
     this.bindingStore = new BindingStore(this.bindingsFile, this.logger)
     this.scoreHistoryStore = new ScoreHistoryStore(this.scoreHistoryFile, this.logger)
     this.imageRenderer = new ApexImageRenderer(this.dataDir)
+    this.fontManager = new FontManager({
+      dataDir: this.dataDir,
+      enabled: this.config.fontAutoDownload,
+      downloadUrl: this.config.fontDownloadUrl,
+      logger: this.logger,
+    })
     this.api = new ApexApiClient({
       apiKey: this.config.apiKey,
       timeoutMs: this.config.timeoutMs,
@@ -116,6 +128,7 @@ export class ApexRankWatchRuntime {
     suffix = '',
   ): Promise<Fragment | null> {
     try {
+      await this.fontManager.ensureAvailable()
       const imagePath = await render()
       return suffix
         ? await this.imagePathToMessageWithSuffix(imagePath, suffix)
@@ -141,6 +154,31 @@ export class ApexRankWatchRuntime {
     }
   }
 
+  private buildHtmlCardRenderContext() {
+    return {
+      logger: this.logger,
+      runtimeConfig: {
+        resourceDir: this.config.leaderboardResourceDir,
+        viewportWidth: this.config.leaderboardViewportWidth,
+        deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+        waitUntil: this.config.leaderboardWaitUntil,
+        titleFont: this.config.leaderboardTitleFont,
+        bodyFont: this.config.leaderboardBodyFont,
+        numberFont: this.config.leaderboardNumberFont,
+        fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+        themePreset: this.config.leaderboardThemePreset,
+        backgroundType: this.config.leaderboardBackgroundType,
+        backgroundValue: this.config.leaderboardBackgroundValue,
+        backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+        customCss: this.config.leaderboardCustomCss,
+      },
+      resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+      puppeteer: {
+        browser: (this.ctx as any).puppeteer?.browser,
+      },
+    }
+  }
+
   // Season entry matrix frozen for this migration:
   // 1. /apexseason [season:string]
   // 2. season keyword auto-reply middleware
@@ -148,28 +186,7 @@ export class ApexRankWatchRuntime {
     const htmlMessage = await this.tryRenderHtmlCardMessage(
       () => renderHtmlCardToBuffer({
         document: buildSeasonCardDocument(seasonInfo),
-        context: {
-          logger: this.logger,
-          runtimeConfig: {
-            resourceDir: this.config.leaderboardResourceDir,
-            viewportWidth: this.config.leaderboardViewportWidth,
-            deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
-            waitUntil: this.config.leaderboardWaitUntil,
-            titleFont: this.config.leaderboardTitleFont,
-            bodyFont: this.config.leaderboardBodyFont,
-            numberFont: this.config.leaderboardNumberFont,
-            fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
-            themePreset: this.config.leaderboardThemePreset,
-            backgroundType: this.config.leaderboardBackgroundType,
-            backgroundValue: this.config.leaderboardBackgroundValue,
-            backgroundApiKey: this.config.leaderboardBackgroundApiKey,
-            customCss: this.config.leaderboardCustomCss,
-          },
-          resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
-          puppeteer: {
-            browser: (this.ctx as any).puppeteer?.browser,
-          },
-        },
+        context: this.buildHtmlCardRenderContext(),
       }),
       `${errorLabelPrefix} html render failed`,
       suffix,
@@ -233,6 +250,13 @@ export class ApexRankWatchRuntime {
       .alias('apex\u5e2e\u52a9')
       .alias('apexrankhelp')
       .action(this.wrap(async (session) => this.handleHelp(session)))
+
+    this.ctx.command('apex_download', 'download or inspect chinese font cache')
+      .alias('apexdownload')
+      .alias('apexfont')
+      .alias('apex\u5b57\u4f53')
+      .alias('apex\u5b57\u4f53\u4e0b\u8f7d')
+      .action(this.wrap(async (session) => this.handleFontDownload(session)))
 
     this.ctx.command('apexrank [input:text]', 'query current rank')
       .alias('apex\u67e5\u8be2')
@@ -556,6 +580,45 @@ export class ApexRankWatchRuntime {
     ].join('\n')
   }
 
+  private async handleFontDownload(session: CommandSession) {
+    const deny = this.guardAccess(session)
+    if (deny) return [this.timeLine(), deny].join('\n')
+
+    try {
+      const current = await this.fontManager.status()
+      if (current.available) {
+        const sourceLabel = current.source === 'system' ? '系统字体' : '本地缓存字体'
+        return [
+          this.timeLine(),
+          `✅ 当前已检测到可用中文字体（来源：${sourceLabel}）。`,
+          current.path ? `📁 路径：${current.path}` : '',
+        ].filter(Boolean).join('\n')
+      }
+
+      const downloaded = await this.fontManager.download(true)
+      if (downloaded.available) {
+        const sourceLabel = downloaded.source === 'system' ? '系统字体' : '本地缓存字体'
+        return [
+          this.timeLine(),
+          `✅ 中文字体已可用（来源：${sourceLabel}）。`,
+          downloaded.path ? `📁 路径：${downloaded.path}` : '',
+        ].filter(Boolean).join('\n')
+      }
+
+      return [
+        this.timeLine(),
+        '⚠️ 当前仍未检测到可用中文字体。',
+        '请检查 GitHub 访问情况，或在插件配置中填写 fontDownloadUrl 后重试。',
+      ].join('\n')
+    } catch (error) {
+      this.logger.error(`font download failed: ${String((error as Error)?.message || error)}`)
+      return [
+        this.timeLine(),
+        '❌ 中文字体下载失败，请检查网络、GitHub 访问情况或自定义 fontDownloadUrl 配置。',
+      ].join('\n')
+    }
+  }
+
   private imageRenderOptions() {
     return {
       checkInterval: this.config.checkInterval,
@@ -790,6 +853,21 @@ export class ApexRankWatchRuntime {
       ...player,
       displayName: displayName || player.name,
     }
+
+    const htmlMessage = await this.tryRenderHtmlCardMessage(
+      async () => {
+        const document = await buildPlayerRankCardDocument(renderPlayer)
+        return renderPanelCardToBuffer({
+          mode: 'player-rank',
+          document,
+          context: this.buildHtmlCardRenderContext(),
+          baseWidth: 1122,
+        })
+      },
+      'player rank html render failed',
+    )
+    if (htmlMessage) return htmlMessage
+
     const imageMessage = await this.tryRenderImageMessage(
       () => this.imageRenderer.renderPlayerRank(renderPlayer),
       'player rank image render failed',
@@ -952,28 +1030,7 @@ export class ApexRankWatchRuntime {
     const htmlMessage = await this.tryRenderHtmlCardMessage(
       () => renderHtmlCardToBuffer({
         document: buildHelpCardDocument(this.imageRenderOptions()),
-        context: {
-          logger: this.logger,
-          runtimeConfig: {
-            resourceDir: this.config.leaderboardResourceDir,
-            viewportWidth: this.config.leaderboardViewportWidth,
-            deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
-            waitUntil: this.config.leaderboardWaitUntil,
-            titleFont: this.config.leaderboardTitleFont,
-            bodyFont: this.config.leaderboardBodyFont,
-            numberFont: this.config.leaderboardNumberFont,
-            fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
-            themePreset: this.config.leaderboardThemePreset,
-            backgroundType: this.config.leaderboardBackgroundType,
-            backgroundValue: this.config.leaderboardBackgroundValue,
-            backgroundApiKey: this.config.leaderboardBackgroundApiKey,
-            customCss: this.config.leaderboardCustomCss,
-          },
-          resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
-          puppeteer: {
-            browser: (this.ctx as any).puppeteer?.browser,
-          },
-        },
+        context: this.buildHtmlCardRenderContext(),
       }),
       'help html render failed',
     )
@@ -989,13 +1046,13 @@ export class ApexRankWatchRuntime {
       this.timeLine(),
       '📖 Apex Rank Watch 帮助',
       '【查询】',
-      '/apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸',
+      '/apexrank <玩家|uid:...> [平台]  优先输出 HTML 玩家档案卡，失败时回退旧图片或文本',
       '示例：/apexrank moeneri pc',
-      '/apex查分 [玩家|uid:...]',
+      '/apex查分 [玩家|uid:...]  优先输出 HTML 玩家档案卡，失败时回退旧图片或文本',
       '/apex绑定 <玩家|uid:...> [平台]、/apex解绑、/apex我的账号、/apex绑定信息',
       '【监控（群聊）】',
       '/apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸',
-      '/apexranklist  别名：/apex列表（有备注时优先显示备注名）',
+      '/apexranklist  别名：/apex列表（优先输出 HTML 监控列表卡；有备注时优先显示备注名）',
       '/apexremark <玩家|uid:...> [平台] [备注]  别名：/apex备注',
       '/apex日上分榜 /apex日掉分榜 /apex周上分榜 /apex周掉分榜',
       'HTML 榜单支持独立资源目录、内置字体回退、背景预设 / 本地文件 / URL / API / 自定义 CSS。',
@@ -1004,10 +1061,11 @@ export class ApexRankWatchRuntime {
       '【信息】',
       '/map  别名：/地图 /排位地图 /apexmap /apexrankmap',
       '/匹配地图',
-      '/apexpredator [平台]  别名：/apex猎杀 /猎杀',
-      '/apexseason [赛季号|current]  别名：/apex赛季 /新赛季',
+      '/apexpredator [平台]  别名：/apex猎杀 /猎杀（优先输出 HTML 卡片，失败时回退旧图片或文本）',
+      '/apexseason [赛季号|current]  别名：/apex赛季 /新赛季（优先输出 HTML 卡片，失败时回退旧图片或文本）',
       '关键词：消息包含“赛季”自动回复（/赛季关闭，/赛季开启）',
       '【管理】',
+      '/apex_download  别名：/apexdownload /apexfont /apex字体 /apex字体下载',
       '/apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban',
       '【参数】',
       '平台：PC / PS4 / X1 / SWITCH（未指定时按 PC -> PS4 -> X1 -> SWITCH 自动尝试）',
@@ -1083,28 +1141,7 @@ export class ApexRankWatchRuntime {
       const htmlMessage = await this.tryRenderHtmlCardMessage(
         () => renderHtmlCardToBuffer({
           document: buildPredatorCardDocument(predatorInfo, selectedPlatform),
-          context: {
-            logger: this.logger,
-            runtimeConfig: {
-              resourceDir: this.config.leaderboardResourceDir,
-              viewportWidth: this.config.leaderboardViewportWidth,
-              deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
-              waitUntil: this.config.leaderboardWaitUntil,
-              titleFont: this.config.leaderboardTitleFont,
-              bodyFont: this.config.leaderboardBodyFont,
-              numberFont: this.config.leaderboardNumberFont,
-              fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
-              themePreset: this.config.leaderboardThemePreset,
-              backgroundType: this.config.leaderboardBackgroundType,
-              backgroundValue: this.config.leaderboardBackgroundValue,
-              backgroundApiKey: this.config.leaderboardBackgroundApiKey,
-              customCss: this.config.leaderboardCustomCss,
-            },
-            resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
-            puppeteer: {
-              browser: (this.ctx as any).puppeteer?.browser,
-            },
-          },
+          context: this.buildHtmlCardRenderContext(),
         }),
         'predator html render failed',
       )
@@ -1315,6 +1352,24 @@ export class ApexRankWatchRuntime {
       return [this.timeLine(), '\u2139\ufe0f \u672c\u7fa4\u76ee\u524d\u6ca1\u6709\u76d1\u63a7\u4efb\u4f55\u73a9\u5bb6\u3002'].join('\n')
     }
 
+    const htmlMessage = await this.tryRenderHtmlCardMessage(
+      async () => {
+        const document = await buildWatchListCardDocument({
+          players: Object.values(group.players),
+          checkInterval: this.config.checkInterval,
+          minValidScore: this.config.minValidScore,
+        })
+        return renderPanelCardToBuffer({
+          mode: 'watch-list',
+          document,
+          context: this.buildHtmlCardRenderContext(),
+          baseWidth: 1180,
+        })
+      },
+      'watch list html render failed',
+    )
+    if (htmlMessage) return htmlMessage
+
     const imageMessage = await this.tryRenderImageMessage(
       () => this.imageRenderer.renderWatchList(Object.values(group.players), this.imageRenderOptions()),
       'watch list image render failed',
@@ -1325,7 +1380,7 @@ export class ApexRankWatchRuntime {
     let index = 0
     for (const player of Object.values(group.players)) {
       index += 1
-      const displayName = player.remark ? `${player.remark} (${player.playerName})` : player.playerName
+      const displayName = this.getPlayerDisplayName(player)
       lines.push(`\ud83d\udc64 \u73a9\u5bb6 ${index}: ${displayName}`)
       lines.push(`\ud83d\udd79\ufe0f \u5e73\u53f0: ${formatPlatform(player.platform)}`)
       lines.push(`\ud83c\udfc6 \u6bb5\u4f4d: ${formatRank(player.rankName, player.rankDiv)}`)
@@ -1626,19 +1681,42 @@ export class ApexRankWatchRuntime {
       }
       if (playerData.selectedLegend) lines.push(`🦸 当前英雄: ${playerData.selectedLegend}`)
       if (playerData.legendKillsRank) lines.push(`🎯 击杀排名: 全球 ${playerData.legendKillsRank.globalPercent}%`)
-      if (playerData.currentState) lines.push(`🎮 当前状态: ${playerData.currentState}`)
+      if (playerData.currentState) lines.push(`🎮 当前状态: ${translateState(playerData.currentState)}`)
       const renderPlayer = {
         ...playerData,
         displayName,
       }
-      const imageMessage = await this.tryRenderImageMessage(
-        () => this.imageRenderer.renderRankChange(renderPlayer, oldScore, newScore, nextPlayerRecord.platform, seasonReset),
-        'rank change image render failed',
+      const htmlMessage = await this.tryRenderHtmlCardMessage(
+        async () => {
+          const document = await buildRankChangeCardDocument({
+            player: renderPlayer,
+            oldScore,
+            newScore,
+            platform: nextPlayerRecord.platform,
+            isSeasonReset: seasonReset,
+          })
+          return renderPanelCardToBuffer({
+            mode: 'rank-change',
+            document,
+            context: this.buildHtmlCardRenderContext(),
+            baseWidth: 1122,
+            overrideBackgroundType: 'preset',
+          })
+        },
+        'rank change html render failed',
       )
-      if (imageMessage) {
-        await this.sendToTarget(group.target, imageMessage)
+      if (htmlMessage) {
+        await this.sendToTarget(group.target, htmlMessage)
       } else {
-        await this.sendToTarget(group.target, lines.join('\n'))
+        const imageMessage = await this.tryRenderImageMessage(
+          () => this.imageRenderer.renderRankChange(renderPlayer, oldScore, newScore, nextPlayerRecord.platform, seasonReset),
+          'rank change image render failed',
+        )
+        if (imageMessage) {
+          await this.sendToTarget(group.target, imageMessage)
+        } else {
+          await this.sendToTarget(group.target, lines.join('\n'))
+        }
       }
     } catch (error) {
       if (error instanceof PlayerNotFoundError) {
@@ -1651,20 +1729,20 @@ export class ApexRankWatchRuntime {
 
   private formatPlayerRankText(playerData: ApexPlayerStats & { displayName?: string }) {
     const lines = [
-      '\ud83d\udcca Apex \u6bb5\u4f4d\u4fe1\u606f',
+      '📊 Apex 段位信息',
       this.timeLine(),
-      `\ud83d\udc64 \u73a9\u5bb6: ${playerData.displayName || playerData.name}`,
-      `\ud83d\udd79\ufe0f \u5e73\u53f0: ${formatPlatform(playerData.platform)}`,
-      `\ud83c\udd94 UID: ${playerData.uid || '\u672a\u77e5'}`,
-      `\ud83c\udfc6 \u6bb5\u4f4d: ${formatRank(playerData.rankName, playerData.rankDiv)}`,
-      `\ud83d\udd22 \u5206\u6570: ${playerData.rankScore}`,
-      `\ud83c\udf96\ufe0f \u7b49\u7ea7: ${playerData.level}`,
-      `\ud83d\udfe2 \u5728\u7ebf\u72b6\u6001: ${playerData.isOnline ? '\u5728\u7ebf' : '\u79bb\u7ebf'}`,
+      `👤 玩家: ${playerData.displayName || playerData.name}`,
+      `🕹️ 平台: ${formatPlatform(playerData.platform)}`,
+      `🆔 UID: ${playerData.uid || '未知'}`,
+      `🏆 段位: ${formatRank(playerData.rankName, playerData.rankDiv)}`,
+      `🔢 分数: ${playerData.rankScore}`,
+      `🎖️ 等级: ${playerData.level}`,
+      `🟢 在线状态: ${playerData.isOnline ? '在线' : '离线'}`,
     ]
-    if (playerData.globalRankPercent && playerData.globalRankPercent !== '\u672a\u77e5') lines.push(`\ud83c\udf10 \u5168\u7403\u6392\u540d: ${playerData.globalRankPercent}%`)
-    if (playerData.selectedLegend) lines.push(`\ud83e\uddb8 \u5f53\u524d\u82f1\u96c4: ${playerData.selectedLegend}`)
-    if (playerData.legendKillsRank) lines.push(`\ud83c\udfaf \u51fb\u6740\u6392\u540d: \u5168\u7403 ${playerData.legendKillsRank.globalPercent}%`)
-    if (playerData.currentState) lines.push(`\ud83c\udfae \u5f53\u524d\u72b6\u6001: ${playerData.currentState}`)
+    if (playerData.globalRankPercent && playerData.globalRankPercent !== '未知') lines.push(`🌐 全球排名: ${playerData.globalRankPercent}%`)
+    if (playerData.selectedLegend) lines.push(`🦸 当前英雄: ${playerData.selectedLegend}`)
+    if (playerData.legendKillsRank) lines.push(`🎯 击杀排名: 全球 ${playerData.legendKillsRank.globalPercent}%`)
+    if (playerData.currentState) lines.push(`🎮 当前状态: ${translateState(playerData.currentState)}`)
     return lines.join('\n')
   }
 

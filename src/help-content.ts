@@ -31,9 +31,9 @@ export function getHelpContentSections(options: HelpContentOptions = {}): HelpCo
     {
       title: '查询',
       rows: [
-        ['/apexrank 玩家 [平台]', '查询玩家段位、分数、在线状态'],
+        ['/apexrank 玩家 [平台]', '查询玩家段位、分数、在线状态；优先输出 HTML 玩家档案卡'],
         ['/apex查询 /视奸', '中文别名，默认 PC，支持 uid:'],
-        ['/apex查分 [玩家|uid:...]', '无参数查询绑定账号，也可临时指定目标'],
+        ['/apex查分 [玩家|uid:...]', '无参数查询绑定账号，也可临时指定目标；优先输出 HTML 玩家档案卡'],
         ['/apex绑定 /apex解绑 /apex我的账号', '绑定默认 Apex 账号并查看绑定信息'],
       ],
     },
@@ -41,7 +41,7 @@ export function getHelpContentSections(options: HelpContentOptions = {}): HelpCo
       title: '监控',
       rows: [
         ['/apexrankwatch 玩家 [平台]', '添加群内持续监控'],
-        ['/apexranklist /apex列表', '查看本群监控列表'],
+        ['/apexranklist /apex列表', '查看本群监控列表；优先输出 HTML 监控列表卡'],
         ['/apexremark 玩家 [平台] [备注] /apex备注', '设置或清除监控备注'],
         ['/apexrankremove 玩家 [平台] /取消持续视奸', '移除指定玩家监控'],
         ['/apex日上分榜 /apex日掉分榜', '查看当前群北京时间自然日榜单'],
@@ -54,14 +54,15 @@ export function getHelpContentSections(options: HelpContentOptions = {}): HelpCo
       rows: [
         ['/map /地图 /排位地图', '排位地图轮换，默认输出图片'],
         ['/匹配地图', '三人赛地图轮换'],
-        ['/apexpredator [平台] /apex猎杀 /猎杀', '大师数量与猎杀底分'],
-        ['/apexseason [赛季号|current] /新赛季', '当前或历史赛季时间'],
-        ['赛季关键词', '群消息包含赛季时自动回复'],
+        ['/apexpredator [平台] /apex猎杀 /猎杀', '大师数量与猎杀底分；优先输出 HTML 卡片'],
+        ['/apexseason [赛季号|current] /新赛季', '当前或历史赛季时间；优先输出 HTML 卡片'],
+        ['赛季关键词', '群消息包含赛季时自动回复，优先输出 HTML 卡片'],
       ],
     },
     {
       title: '管理',
       rows: [
+        ['/apex_download /apex字体', '检查并下载中文字体缓存'],
         ['/apexblacklist add 玩家ID', '加入动态黑名单'],
         ['/apexblacklist list', '查看配置与动态黑名单'],
         ['/赛季关闭 /赛季开启', '管理本群赛季关键词回复'],

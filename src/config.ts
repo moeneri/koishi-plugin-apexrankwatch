@@ -18,6 +18,8 @@ export interface Config {
   whitelistEnabled?: boolean
   whitelistGroups?: StringList
   allowPrivate?: boolean
+  fontAutoDownload?: boolean
+  fontDownloadUrl?: string
   leaderboardRenderMode?: 'html' | 'legacy' | 'text'
   leaderboardEnableLegacyImageFallback?: boolean
   leaderboardEnableTextFallback?: boolean
@@ -50,6 +52,8 @@ export interface Config {
   whitelist_enabled?: boolean
   whitelist_groups?: StringList
   allow_private?: boolean
+  font_auto_download?: boolean
+  font_download_url?: string
   data_dir?: string
 }
 
@@ -68,6 +72,8 @@ export interface ResolvedConfig {
   whitelistEnabled: boolean
   whitelistGroups: string
   allowPrivate: boolean
+  fontAutoDownload: boolean
+  fontDownloadUrl: string
   leaderboardRenderMode: 'html' | 'legacy' | 'text'
   leaderboardEnableLegacyImageFallback: boolean
   leaderboardEnableTextFallback: boolean
@@ -123,6 +129,11 @@ export const ConfigSchema = Schema.intersect([
   Schema.object({
     dataDir: Schema.string().default('./data/apexrankwatch').description('数据与图片缓存目录。旧版 groups.json 与 AstrBot 风格数据会在此目录下自动兼容。'),
   }).description('数据存储'),
+
+  Schema.object({
+    fontAutoDownload: Schema.boolean().default(true).description('缺少中文字体时是否自动下载字体缓存。'),
+    fontDownloadUrl: Schema.string().default('').description('自定义中文字体下载地址；留空时使用官方字体资源仓库。'),
+  }).description('中文字体保障'),
 
   Schema.object({
     leaderboardRenderMode: Schema.union([
@@ -224,6 +235,8 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     whitelistEnabled: pickBoolean(false, config.whitelistEnabled, config.whitelist_enabled),
     whitelistGroups: pickStringList(config.whitelistGroups, config.whitelist_groups),
     allowPrivate: pickBoolean(true, config.allowPrivate, config.allow_private),
+    fontAutoDownload: pickBoolean(true, config.fontAutoDownload, config.font_auto_download),
+    fontDownloadUrl: pickString(config.fontDownloadUrl, config.font_download_url),
     dataDir: pickString(config.dataDir, config.data_dir) || './data/apexrankwatch',
     leaderboardRenderMode: (pickString(config.leaderboardRenderMode) as 'html' | 'legacy' | 'text') || 'html',
     leaderboardEnableLegacyImageFallback: pickBoolean(true, config.leaderboardEnableLegacyImageFallback),
