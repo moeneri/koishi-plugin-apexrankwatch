@@ -1,10 +1,8 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { extname, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 const DATA_URI_CACHE = new Map<string, Promise<string>>()
-const FILE_URL_CACHE = new Map<string, string>()
 
 function packageRootCandidates() {
   return [
@@ -177,15 +175,6 @@ async function resolveAssetDataUri(filePath: string) {
   return task
 }
 
-function resolveAssetFileUrl(filePath: string) {
-  if (!existsSync(filePath)) return ''
-  const cached = FILE_URL_CACHE.get(filePath)
-  if (cached) return cached
-  const href = pathToFileURL(filePath).href
-  FILE_URL_CACHE.set(filePath, href)
-  return href
-}
-
 export async function resolveLogoAsset() {
   return resolveAssetDataUri(assetPath('logo.png'))
 }
@@ -195,11 +184,11 @@ export async function resolveDefaultAvatarAsset() {
 }
 
 export async function resolveRankAsset(rankName: string, rankDiv = 0) {
-  return resolveAssetFileUrl(assetPath('ranks', rankIconName(rankName, rankDiv)))
+  return resolveAssetDataUri(assetPath('ranks', rankIconName(rankName, rankDiv)))
 }
 
 export async function resolveLegendAsset(legendName: string) {
-  return resolveAssetFileUrl(assetPath('legends', legendIconName(legendName)))
+  return resolveAssetDataUri(assetPath('legends', legendIconName(legendName)))
 }
 
 export async function resolveStatusAsset(status: string) {
