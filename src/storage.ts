@@ -346,6 +346,17 @@ export class ScoreHistoryStore {
     return this.entries.filter((entry) => entry.groupId === groupId)
   }
 
+  findLatestByPlayer(groupId: string, playerKey: string): ScoreHistoryEntry | null {
+    let latest: ScoreHistoryEntry | null = null
+    for (const entry of this.entries) {
+      if (entry.groupId !== groupId || entry.playerKey !== playerKey) continue
+      if (!latest || entry.recordedAt >= latest.recordedAt) {
+        latest = entry
+      }
+    }
+    return latest ? { ...latest } : null
+  }
+
   private prune(now = Date.now()) {
     const threshold = now - this.retentionDays * 24 * 60 * 60 * 1000
     this.entries = this.entries.filter((entry) => entry.recordedAt >= threshold)
