@@ -2,6 +2,7 @@ import { mkdir, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { Bot, Context, Logger, Session, h, type Fragment } from 'koishi'
 import { ApexApiClient, PlayerNotFoundError } from './api'
+import { RankChangeCommitter } from './rank-change-commit'
 import { ResolvedConfig } from './config'
 import { FontManager } from './font'
 import { ApexImageRenderer } from './image'
@@ -61,6 +62,7 @@ export class ApexRankWatchRuntime {
   private readonly settingsStore: SettingsStore
   private readonly bindingStore: BindingStore
   private readonly scoreHistoryStore: ScoreHistoryStore
+  private readonly rankChangeCommitter: RankChangeCommitter
   private readonly imageRenderer: ApexImageRenderer
   private readonly fontManager: FontManager
   private readonly api: ApexApiClient
@@ -88,6 +90,10 @@ export class ApexRankWatchRuntime {
     this.settingsStore = new SettingsStore(this.settingsFile, this.logger)
     this.bindingStore = new BindingStore(this.bindingsFile, this.logger)
     this.scoreHistoryStore = new ScoreHistoryStore(this.scoreHistoryFile, this.logger)
+    this.rankChangeCommitter = new RankChangeCommitter({
+      groupStore: this.groupStore,
+      scoreHistoryStore: this.scoreHistoryStore,
+    })
     this.imageRenderer = new ApexImageRenderer(this.dataDir)
     this.fontManager = new FontManager({
       dataDir: this.dataDir,
@@ -1637,30 +1643,26 @@ export class ApexRankWatchRuntime {
       }
       const historyEntry = this.createScoreHistoryEntry(groupId, playerKey, nextPlayerRecord, oldScore, newScore)
 
-      group.players[playerKey] = nextPlayerRecord
-      try {
-        await this.groupStore.save()
-        this.logger.info(`group state updated for ${groupId}/${playerKey}: ${oldScore} -> ${newScore}`)
-      } catch (error) {
-        group.players[playerKey] = previousPlayerRecord
-        this.logger.error(`group state save failed for ${groupId}/${playerKey}: ${String((error as Error)?.message || error)}`)
-        return
-      }
+      const commitResult = await this.rankChangeCommitter.commit({
+        group,
+        groupId,
+        playerKey,
+        previousItem: previousPlayerRecord,
+        nextItem: nextPlayerRecord,
+        historyEntry,
+      })
 
-      try {
-        await this.scoreHistoryStore.append(historyEntry)
-        this.logger.info(`score history appended for ${groupId}/${playerKey}: ${historyEntry.delta >= 0 ? '+' : ''}${historyEntry.delta}`)
-      } catch (error) {
-        this.logger.error(`score history append failed for ${groupId}/${playerKey}: ${String((error as Error)?.message || error)}`)
-        group.players[playerKey] = previousPlayerRecord
-        try {
-          await this.groupStore.save()
-          this.logger.warn(`group state rolled back for ${groupId}/${playerKey} after history append failure`)
-        } catch (rollbackError) {
-          this.logger.error(`group state rollback failed for ${groupId}/${playerKey}: ${String((rollbackError as Error)?.message || rollbackError)}`)
-        }
+      if (commitResult.status === 'failed') {
+        this.logger.error(`rank change commit failed for ${groupId}/${playerKey}: ${commitResult.errorMessage || 'unknown error'}`)
         return
       }
+      if (commitResult.status === 'pending-state') {
+        this.logger.error(`rank change commit pending for ${groupId}/${playerKey}: ${commitResult.errorMessage || 'unknown error'}`)
+        return
+      }
+      if (commitResult.status === 'noop') return
+
+      this.logger.info(`rank change ${commitResult.status} for ${groupId}/${playerKey}: ${historyEntry.delta >= 0 ? '+' : ''}${historyEntry.delta}`)
 
       const diff = newScore - oldScore
       const diffText = diff > 0 ? `上升 ${diff}` : `下降 ${Math.abs(diff)}`
